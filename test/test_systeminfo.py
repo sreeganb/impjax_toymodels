@@ -16,6 +16,7 @@ import IMP.pmi.macros
 import IMP.pmi.topology
 import ihm.cross_linkers
 import jax.numpy as jnp
+import string
 
 import sys
 import os
@@ -29,6 +30,19 @@ fasta_dir = os.path.join(data_dir, "fasta")
 
 topology_file = os.path.join(data_dir, "topology.txt")
 
+# Declare the number of copies of the molecules that is going to be created
+n_copies = 2
+
+def _chain_id_alphabet():
+    """A, B, ... Z, 0, ... 9, then AA, AB, ... for large systems"""
+    singles = list(string.ascii_uppercase + string.ascii_lowercase + string.digits)
+    for c in singles:
+        yield c
+    for first in singles:
+        for second in singles:
+            yield first + second
+
+chain_ids = _chain_id_alphabet()
 m = IMP.Model()
 
 # Read in topology file
@@ -37,6 +51,7 @@ topology = IMP.pmi.topology.TopologyReader(topology_file,
                                            fasta_dir=fasta_dir)
 system = IMP.pmi.topology.System(m, name='Modeling KCOIL-ECOIL multimer')
 #st1 = system.create_state()
+
 # Sanity check: print parsed components before building
 print("Parsed topology components:")
 for c in topology.get_components():
@@ -44,7 +59,13 @@ for c in topology.get_components():
           f"res={c.residue_range}  rb={c.rigid_body}")
 
 bs = IMP.pmi.macros.BuildSystem(m, name="ToyModel", resolutions=[1])
-bs.add_state(topology)
+st1 = bs.add_state(topology)
+print("What is the state:", st1)
+print("print the molecules so you can make copies")
+molecules = bs.get_molecules()[0]
+print(molecules)
+st1.create_copy
+
 root_hier, dof = bs.execute_macro()
 output = IMP.pmi.output.Output()
 output.init_rmf("ini_all.rmf3", [root_hier])
@@ -68,10 +89,10 @@ print("\nMolecules in the system:", molecules)
 bsys = BuiltSystem(
     model=m,
     system=system,
-    state=bs.get_state(),
+    state=st1,
     root_hier=root_hier,
     dof=dof,
-    molecules={(mol.get_name(), 0): mol for mol in molecules}
+    molecules=molecules
 )
 bsys.describe()
 

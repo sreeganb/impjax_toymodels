@@ -18,6 +18,7 @@ class BuiltSystem:
     root_hier: "IMP.atom.Hierarchy"
     dof: "IMP.pmi.dof.DegreesOfFreedom"
     molecules: dict = field(default_factory=dict)   # (name, copy_index) -> Molecule
+    spec: Optional["IMP.pmi.topology.Specification"] = None
 
     @property
     def n_copies(self):
