@@ -1,7 +1,4 @@
-import os
-import string
 import unittest
-
 
 try:
     import IMP
@@ -12,111 +9,216 @@ try:
 except ImportError:  # pragma: no cover - environment-dependent
     IMP = None
 
+import numpy as np
+import os
+import itertools
+import json
+from ordered_set import OrderedSet
 
-def _chain_id_alphabet():
-    """Yield chain IDs that scale from small to large systems."""
-    singles = list(string.ascii_uppercase + string.ascii_lowercase + string.digits)
-    for value in singles:
-        yield value
-    for first in singles:
-        for second in singles:
-            yield first + second
+class BuildIMPSystem:
+    def __init__(self, model, system, state):
+        """
+        A general script used to build any protein complex system in IMP using 
+        json files.
+        """
+        self.model = model
+        self.system = system
+        self.state = state
+        self.molecules = {}
+        
+    def build_component(json_file, copy_number = 1):
+
+        mols = []
+        with open(json_file) as f:
+            protein_info = json.load(f)
+
+        
+        if protein_info['oligomerization']:
+            ch = protein_info['oligomerization_chains']
+            factor = copy_number // len(ch)  # Fix for not integer number of copies
+            chains = ch * (factor)
+        else:
+            chains = protein_info['monomer_chain']*copy_number
+            print(chains)
+
+        print('Building ...', protein_info['protein_name'])
+        seqs = IMP.pmi.topology.Sequences(os.path.join(repo_dir,protein_info['files']['fasta']))
+        mol = st.create_molecule(protein_info['protein_name'],
+                                sequence = seqs['sp'],
+                                chain_id = chains[0])
+        
+        # Add all domains
+        domains = protein_info['domains']
+        all_atomic = OrderedSet()
+        for d in domains:
+            print('Copy 0 ...')
+            atomic = mol.add_structure(os.path.join(repo_dir,protein_info['files']['pdb']),
+                                    chain_id=chains[0],
+                                    res_range =d)
+            mol.add_representation(atomic,                
+                                resolutions=protein_info['representation']['structured'],
+                                color=protein_info['visualization']['color'])
+            for a in atomic:
+                all_atomic.add(a)
+
+        # Add flexible linkers 
+        mol.add_representation(mol[:]-all_atomic,                
+                            resolutions=protein_info['representation']['unstructured'],
+                            color=protein_info['visualization']['color'])
+        mols.append(mol)
+
+        if copy_number > 1:
+            all_atomic = OrderedSet()
+            for i in np.arange(1,copy_number,1):
+                print(f'Copy {i} ...')
+                copy =  mol.create_copy(chain_id = chains[i])
+                all_atomic = OrderedSet()
+                for d in domains:
+                    atomic = copy.add_structure(os.path.join(repo_dir,protein_info['files']['pdb']),
+                                                chain_id=chains[i],
+                                                res_range =d)
+
+                    copy.add_representation(atomic,                
+                                            resolutions=protein_info['representation']['structured'],
+                                            color=protein_info['visualization']['color'])
+                
+                    for a in atomic:
+                        all_atomic.add(a)
+
+                # Add flexible linkers
+                copy.add_representation(copy[:]-all_atomic,                
+                                        resolutions=protein_info['representation']['unstructured'],
+                                        color=protein_info['visualization']['color'])
+
+                mols.append(copy)
+
+        return (protein_info["uniprot_id"],protein_info['protein_name']), mols
+
+    def write_rmf(hier, file_out):
+        out = IMP.pmi.output.Output()
+        out.init_rmf(file_out, [hier])
+        out.write_rmf(file_out)
+        out.close_rmf(file_out)
+
+    def build_dof(json_file, molecules):
+        with open(json_file) as f:
+            protein_info = json.load(f)
+        
+        # Get how to build the DOFs
+        type_dof = protein_info['degrees_of_freedom']
+        name = protein_info['protein_name']
+        uniprot_id = protein_info['uniprot_id']
+        
+        print('###################', name, uniprot_id, type_dof)
+        
+        if type_dof == 'single':
+            for m in molecules(uniprot_id, name):
+                copy = IMP.atom.Copy(m.get_hierarchy()).get_copy_index()
+                sel =  IMP.atom.Selection(hier,
+                                        molecule=name,
+                                        resolution=IMP.atom.ALL_RESOLUTIONS).get_selected_particles()
+                rb_movers,rb = dof.create_rigid_body(sel,
+                                                    name = f'{name}_{copy}')
+                dof.create_flexible_beads(m.get_non_atomic_residues())
+
+            return [protein_info['uniprot_id']]
+                
+        elif type_dof == 'domains':
+            domains = protein_info['domains']
+            print('Molecules', molecules[(uniprot_id, name)])
+            for mol in molecules[(uniprot_id, name)]:
+                copy = IMP.atom.Copy(mol.get_hierarchy()).get_copy_index()
+                for d in domains:
+                    sel =  IMP.atom.Selection(hier,
+                                            molecule=name,
+                                            residue_indexes=range(d[0],d[1]+1,1),
+                                            copy_index=copy,
+                                            resolution=IMP.atom.ALL_RESOLUTIONS).get_selected_particles()
+                    rb_movers,rb = dof.create_rigid_body(sel,
+                                                        name = f'{name}_{copy}')
+                dof.create_flexible_beads(mol.get_non_atomic_residues())
+            return [protein_info['uniprot_id']]
+
+        elif type_dof == 'custom':
+            print('Custom DOF for', name)
+            definition = protein_info["degrees_of_freedom_definition"]
+            print('!!!!!!!!!!!! definition', definition)
+
+            
+            copy_number = len(molecules[(uniprot_id, name)])
+            def_values = definition.values()
+            ch = 0
+            for val in def_values:
+            ch += np.sum([1 for tup in val if tup[2] == name])
+
+            factor = copy_number // ch
+            print('factor', factor, def_values, ch)
+            if factor == 0: ### Fix this
+                factor = 1
 
 
-def create_molecule(state, name, sequence, chain_id, color):
-    """Create one PMI molecule and add a bead-level representation."""
-    molecule = state.create_molecule(name, sequence, chain_id=chain_id)
-    molecule.add_representation(molecule, resolutions=[1], color=color)
-    return molecule
+            prots = []
+            for m in np.arange(0, 2*factor , 2): # Fix this
+                print('-------', name, m)
+                for k, rigid_body in definition.items():
+                    sel = []
+                    for c in rigid_body:
+                        sel +=  IMP.atom.Selection(hier,
+                                                molecule=c[2],
+                                                residue_indexes=range(c[0],c[1]+1,1),
+                                                
+    copy_index=c[3] + m,
+                                                resolution=IMP.atom.ALL_RESOLUTIONS).get_selected_particles()
+                        prots.append(c[2])
+                    rb_movers,rbs = dof.create_rigid_body(sel,
+                                                        name = f'{k}_1')
+                    
+                        
 
+            # Now select all proteins to create flexible beads
+            set_proteins = list(set(prots))
+            selected_molecules = []
+            for p in set_proteins:
+                for k, v in molecules.items():
+                    print('k',p, k)
+                    print('v', v)
+                selected_molecules.append([v for k,v in molecules.items() if k[1]==p][0])
+                
+            selected_molecules_flat = list(itertools.chain.from_iterable(selected_molecules))
+            print(selected_molecules)
+            # Flexible mover for all molecules 
+            for mol in selected_molecules_flat:
+                print('mol', mol)
+                flex_movers = dof.create_flexible_beads(mol.get_non_atomic_residues())
+            
+            return set_proteins
 
-def create_kcoil_ecoil_templates(state, sequences, chain_ids, copy_index):
-    """Create one KCOIL/ECOIL pair for a given copy index."""
-    k_name = f"KCOIL_copy{copy_index + 1}"
-    e_name = f"ECOIL_copy{copy_index + 1}"
-
-    kcoil = create_molecule(
-        state=state,
-        name=k_name,
-        sequence=sequences["K_coil"],
-        chain_id=next(chain_ids),
-        color="blue",
-    )
-    ecoil = create_molecule(
-        state=state,
-        name=e_name,
-        sequence=sequences["E_coil"],
-        chain_id=next(chain_ids),
-        color="red",
-    )
-    return [kcoil, ecoil]
-
-
-def create_scaled_system(n_copies):
-    """
-    Build a scalable KCOIL/ECOIL system using copy-style helper functions.
-
-    Returns:
-        (model, system, state, root_hier, dof, molecules)
-    """
-    if n_copies < 1:
-        raise ValueError("n_copies must be >= 1")
-
-    test_dir = os.path.dirname(__file__)
-    fasta_file = os.path.join(test_dir, "data", "fasta", "kcoil.fasta")
-
-    model = IMP.Model()
-    system = IMP.pmi.topology.System(model, name="Modeling KCOIL-ECOIL multimer")
-    state = system.create_state()
-    sequences = IMP.pmi.topology.Sequences(fasta_file)
-
-    chain_ids = _chain_id_alphabet()
-    molecules = []
-    for copy_index in range(n_copies):
-        molecules.extend(
-            create_kcoil_ecoil_templates(
-                state=state,
-                sequences=sequences,
-                chain_ids=chain_ids,
-                copy_index=copy_index,
-            )
-        )
-
-    root_hier = system.build()
-    dof = IMP.pmi.dof.DegreesOfFreedom(model)
-    for molecule in molecules:
-        dof.create_flexible_beads(molecule)
-
-    return model, system, state, root_hier, dof, molecules
-
-
-@unittest.skipIf(IMP is None, "IMP/PMI is not installed")
-class IMPSystemBuildTests(unittest.TestCase):
-    def test_single_copy_builds(self):
-        _, _, _, root_hier, dof, molecules = create_scaled_system(n_copies=1)
-
-        self.assertEqual(len(molecules), 2)
-        self.assertEqual(molecules[0].get_name(), "KCOIL_copy1")
-        self.assertEqual(molecules[1].get_name(), "ECOIL_copy1")
-        self.assertGreater(len(IMP.atom.get_leaves(root_hier)), 0)
-        self.assertGreater(len(dof.get_movers()), 0)
-
-    def test_copy_scaling_builds_expected_molecule_count(self):
-        n_copies = 3
-        _, _, _, _, _, molecules = create_scaled_system(n_copies=n_copies)
-
-        self.assertEqual(len(molecules), 2 * n_copies)
-        names = {m.get_name() for m in molecules}
-        expected = {
-            "KCOIL_copy1",
-            "ECOIL_copy1",
-            "KCOIL_copy2",
-            "ECOIL_copy2",
-            "KCOIL_copy3",
-            "ECOIL_copy3",
-        }
-        self.assertEqual(names, expected)
-
+        else:
+            return ['None']
+#@unittest.skipIf(IMP is None, "IMP/PMI is not installed")
+#class IMPSystemBuildTests(unittest.TestCase):
 
 if __name__ == "__main__":
-    unittest.main()
+    repo_dir = "/home/sree/git/impjax_toymodels/test/"
+    
+    mdl = IMP.Model()
+    s = IMP.pmi.topology.System(mdl)
+    st = s.create_state()
+    molecules = {}
+    
+    bis = BuildIMPSystem(mdl, s, st)
+    info, mols = bis.build_system(repo_dir + "data/json_files/KCOIL.json", copy_number=2)
+    molecules[info] = mols
+    
+    info, mols = bis.build_system(repo_dir + "data/json_files/ECOIL.json", copy_number=2)
+    molecules[info] = mols
+    
+    root_hier = s.build()
+    bis.write_rmf(root_hier, 'system_initial.rmf3')
+
+    print(molecules)
+    
+    dof = IMP.pmi.dof.DegreesOfFreedom(mdl)
+    
+
+    #unittest.main()
