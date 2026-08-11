@@ -6,6 +6,7 @@ try:
     import IMP.core
     import IMP.pmi.dof
     import IMP.pmi.topology
+    from IMP.pmi.tools import OrderedSet
 except ImportError:  # pragma: no cover - environment-dependent
     IMP = None
 
@@ -13,7 +14,6 @@ import numpy as np
 import os
 import itertools
 import json
-from ordered_set import OrderedSet
 
 class BuildIMPSystem:
     def __init__(self, model, system, state):
@@ -26,7 +26,7 @@ class BuildIMPSystem:
         self.state = state
         self.molecules = {}
         
-    def build_component(json_file, copy_number = 1):
+    def build_component(self, json_file, copy_number = 1):
 
         mols = []
         with open(json_file) as f:
@@ -94,13 +94,13 @@ class BuildIMPSystem:
 
         return (protein_info["uniprot_id"],protein_info['protein_name']), mols
 
-    def write_rmf(hier, file_out):
+    def write_rmf(self, hier, file_out):
         out = IMP.pmi.output.Output()
         out.init_rmf(file_out, [hier])
         out.write_rmf(file_out)
         out.close_rmf(file_out)
 
-    def build_dof(json_file, molecules):
+    def build_dof(self, json_file, molecules):
         with open(json_file) as f:
             protein_info = json.load(f)
         
@@ -149,7 +149,7 @@ class BuildIMPSystem:
             def_values = definition.values()
             ch = 0
             for val in def_values:
-            ch += np.sum([1 for tup in val if tup[2] == name])
+                ch += np.sum([1 for tup in val if tup[2] == name])
 
             factor = copy_number // ch
             print('factor', factor, def_values, ch)
@@ -207,10 +207,10 @@ if __name__ == "__main__":
     molecules = {}
     
     bis = BuildIMPSystem(mdl, s, st)
-    info, mols = bis.build_system(repo_dir + "data/json_files/KCOIL.json", copy_number=2)
+    info, mols = bis.build_component(repo_dir + "data/json_files/KCOIL.json", copy_number=2)
     molecules[info] = mols
     
-    info, mols = bis.build_system(repo_dir + "data/json_files/ECOIL.json", copy_number=2)
+    info, mols = bis.build_component(repo_dir + "data/json_files/ECOIL.json", copy_number=2)
     molecules[info] = mols
     
     root_hier = s.build()
