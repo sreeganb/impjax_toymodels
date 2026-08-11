@@ -6,7 +6,9 @@ try:
     import IMP.core
     import IMP.pmi.dof
     import IMP.pmi.topology
+    import IMP.pmi.output
     from IMP.pmi.tools import OrderedSet
+    import IMP.pmi.tools
 except ImportError:  # pragma: no cover - environment-dependent
     IMP = None
 
@@ -199,21 +201,24 @@ class BuildIMPSystem:
 #class IMPSystemBuildTests(unittest.TestCase):
 
 if __name__ == "__main__":
-    repo_dir = "/home/sree/git/impjax_toymodels/test/"
-    
+    #repo_dir = "/home/sree/git/impjax_toymodels/test/"
+    repo_dir = "/Users/sreeganeshbalasubramani/git/impjax_toymodels/test/"
     mdl = IMP.Model()
     s = IMP.pmi.topology.System(mdl)
     st = s.create_state()
     molecules = {}
     
     bis = BuildIMPSystem(mdl, s, st)
-    info, mols = bis.build_component(repo_dir + "data/json_files/KCOIL.json", copy_number=2)
+    info, mols = bis.build_component(repo_dir + "data/json_files/KCOIL.json", copy_number=4)
     molecules[info] = mols
     
-    info, mols = bis.build_component(repo_dir + "data/json_files/ECOIL.json", copy_number=2)
+    info, mols = bis.build_component(repo_dir + "data/json_files/ECOIL.json", copy_number=4)
     molecules[info] = mols
     
     root_hier = s.build()
+    IMP.pmi.tools.shuffle_configuration(molecules,
+                                    max_translation=300,
+                                    avoidcollision_rb=True)
     bis.write_rmf(root_hier, 'system_initial.rmf3')
 
     print(molecules)
