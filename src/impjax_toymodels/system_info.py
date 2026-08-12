@@ -11,26 +11,21 @@ import IMP.pmi.topology
 
 @dataclass
 class BuiltSystem:
-    """Everything downstream code needs about a built system."""
-    model: "IMP.Model"
-    system: "IMP.pmi.topology.System"
-    state: "IMP.pmi.topology.State"
-    root_hier: "IMP.atom.Hierarchy"
-    dof: "IMP.pmi.dof.DegreesOfFreedom"
-    molecules: dict = field(default_factory=dict)   # (name, copy_index) -> Molecule
-    spec: Optional["IMP.pmi.topology.Specification"] = None
-
-    @property
-    def n_copies(self):
-        return self.spec.n_copies if self.spec else 1
-
+    def __init__(self, model, system, state, root_hier, dof, molecules):
+        self.model = model
+        self.system = system
+        self.state = state
+        self.root_hier = root_hier
+        self.dof = dof
+        self.molecules = molecules
+   
     @property
     def molecule_names(self):
-        return [m.name for m in self.spec.molecules] if self.spec else []
+        return list({name for (name, copy_index) in self.molecules.keys()})
 
     def copies_of(self, molecule_name):
         """PMI Molecule objects for every copy of `molecule_name`, in order."""
-        return [self.molecules[(molecule_name, i)] for i in range(self.n_copies)]
+        return [self.molecules[(molecule_name, i)] for i in range(self.copies_of_molecule(molecule_name))]
 
     def rigid_bodies_and_beads(self):
         """
@@ -59,11 +54,10 @@ class BuiltSystem:
     def describe(self):
         """Print a compact inventory of what was actually built."""
         rigid_bodies, beads = self.rigid_bodies_and_beads()
-        print(f"Built system '{self.spec.name if self.spec else '?'}' "
-              f"with {self.n_copies} copy/copies")
+        print(f"Built system with {len(self.molecule_names)} molecule types")
         for (name, copy_index), mol in sorted(self.molecules.items()):
-            n_leaves = len(IMP.core.get_leaves(mol.get_hierarchy()))
-            chain = mol.get_hierarchy().get_name()
+            n_leaves = len(IMP.core.get_leaves(self.root_hier))
+            chain = self.root_hier.get_name()
             print(f"  {name}.{copy_index:<3d} chain={chain:<4s} beads={n_leaves}")
         print(f"  rigid bodies  : {len(rigid_bodies)}")
         print(f"  flexible beads: {len(beads)}")

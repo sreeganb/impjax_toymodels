@@ -17,6 +17,8 @@ import os
 import itertools
 import json
 
+from impjax_toymodels.system_info import BuiltSystem
+
 class BuildIMPSystem:
     def __init__(self, model, system, state):
         """
@@ -44,8 +46,8 @@ class BuildIMPSystem:
             print(chains)
 
         print('Building ...', protein_info['protein_name'])
-        seqs = IMP.pmi.topology.Sequences(os.path.join(repo_dir,protein_info['files']['fasta']))
-        mol = st.create_molecule(protein_info['protein_name'],
+        seqs = IMP.pmi.topology.Sequences(os.path.join(os.path.dirname(json_file),protein_info['files']['fasta']))
+        mol = self.state.create_molecule(protein_info['protein_name'],
                                 sequence = seqs['sp'],
                                 chain_id = chains[0])
         
@@ -96,13 +98,36 @@ class BuildIMPSystem:
 
         return (protein_info["uniprot_id"],protein_info['protein_name']), mols
 
+    def add_connectivity_restraint(self, name = 'Connectivity'):
+        for k, mols in self.molecules.items():
+            for mol in mols:
+                copy_number = IMP.atom.Copy(mol.get_hierarchy()).get_copy_index()
+                cr = IMP.pmi.restraints.stereochemistry.ConnectivityRestraint(mol)
+                cr.set_label(f'{name}.{mol.get_name()}.{copy_number}')
+                cr.add_to_model()
+                output_objects.append(cr)
+
+    def add_excluded_volume_restraint(self, weight = 1., name = 'ExVol'):
+
+        mols = []
+        for k, m in self.molecules.items():
+            mols += m
+        print('Excluded volume molecules', mols)
+        evr = IMP.pmi.restraints.stereochemistry.ExcludedVolumeSphere(included_objects=self.root_hier,
+                                                                    resolution=10)
+        evr.set_label(f'{name}')
+        evr.add_to_model()
+        evr.set_weight(weight)
+        output_objects.append(evr)
+
+
     def write_rmf(self, hier, file_out):
         out = IMP.pmi.output.Output()
         out.init_rmf(file_out, [hier])
         out.write_rmf(file_out)
         out.close_rmf(file_out)
 
-    def build_dof(self, json_file, molecules):
+    def build_dof(self, json_file, hier, dof, molecules):
         with open(json_file) as f:
             protein_info = json.load(f)
         
@@ -114,7 +139,7 @@ class BuildIMPSystem:
         print('###################', name, uniprot_id, type_dof)
         
         if type_dof == 'single':
-            for m in molecules(uniprot_id, name):
+            for m in molecules[(uniprot_id, name)]:
                 copy = IMP.atom.Copy(m.get_hierarchy()).get_copy_index()
                 sel =  IMP.atom.Selection(hier,
                                         molecule=name,
@@ -202,28 +227,53 @@ class BuildIMPSystem:
 
 if __name__ == "__main__":
     #repo_dir = "/home/sree/git/impjax_toymodels/test/"
-    repo_dir = "/Users/sreeganeshbalasubramani/git/impjax_toymodels/test/"
+    repo_dir = os.getcwd()
+    #repo_dir = "/Users/sreeganeshbalasubramani/git/impjax_toymodels/test/"
     mdl = IMP.Model()
     s = IMP.pmi.topology.System(mdl)
     st = s.create_state()
     molecules = {}
     
     bis = BuildIMPSystem(mdl, s, st)
-    info, mols = bis.build_component(repo_dir + "data/json_files/KCOIL.json", copy_number=4)
+    info, mols = bis.build_component(repo_dir + "/data/json_files/KCOIL.json", copy_number=4)
     molecules[info] = mols
     
-    info, mols = bis.build_component(repo_dir + "data/json_files/ECOIL.json", copy_number=4)
+    info, mols = bis.build_component(repo_dir + "/data/json_files/ECOIL.json", copy_number=4)
     molecules[info] = mols
     
     root_hier = s.build()
-    IMP.pmi.tools.shuffle_configuration(molecules,
+    
+    dof = IMP.pmi.dof.DegreesOfFreedom(mdl)
+    dof_built=[]
+    for info, mols in molecules.items():
+        print("information: ", info[1])
+        print("mols", mols)
+        if info[1] not in dof_built:
+            b = bis.build_dof(repo_dir + f"/data/json_files/{info[1]}.json", root_hier, dof, molecules)
+            dof_built.append(b)
+        else:
+            print(f"Skipped building DOF for {info[1]}")
+    
+    output_objects = []
+        
+    mol_names = []
+    for k, ms in molecules.items():
+        mol_names += ms
+    IMP.pmi.tools.shuffle_configuration(mol_names,
                                     max_translation=300,
                                     avoidcollision_rb=True)
     bis.write_rmf(root_hier, 'system_initial.rmf3')
 
     print(molecules)
-    
-    dof = IMP.pmi.dof.DegreesOfFreedom(mdl)
-    
 
     #unittest.main()
+    
+    built_system = BuiltSystem(
+        model=mdl,
+        system=s,
+        state=st,
+        root_hier=root_hier,
+        dof=dof,
+        molecules=molecules
+    )
+    built_system.describe()
