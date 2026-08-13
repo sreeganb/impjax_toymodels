@@ -274,7 +274,22 @@ if __name__ == "__main__":
         mol_names += ms
     
     restraints_set.append(bis.add_connectivity_restraint(molecules=molecules))
-    restraints_set.append(bis.add_excluded_volume_restraint(root_hier=root_hier, molecules=molecules))
+#    restraints_set.append(bis.add_excluded_volume_restraint(root_hier=root_hier, molecules=molecules))
+
+    sf_imp = IMP.core.RestraintsScoringFunction(restraints_set)
+    score = sf_imp.evaluate(False)
+    print("Initial score:", score)
+
+    # Separate out the JAX comaptible code here
+    # IMP model and scoring functions can be converted to JAX model and JAX scoring functions
+    # within IMP
+    # Take the sf_imp and convert it to a JAX-compatible scoring function
+    ji = sf_imp._get_jax()
+    print(ji)
+    jax_score_func = ji.score_func 
+    jmodel = ji.get_jax_model()
+    print("Initial JAX score:", jax_score_func(jmodel))
+
     
     IMP.pmi.tools.shuffle_configuration(mol_names,
                                     max_translation=300,
@@ -283,9 +298,9 @@ if __name__ == "__main__":
 
     print(molecules)
 
-    sf_imp = IMP.core.RestraintsScoringFunction(restraints_set)
+#    sf_imp = IMP.core.RestraintsScoringFunction(restraints_set)
     score = sf_imp.evaluate(False)
-    print("Initial score:", score)
+    print("post-shuffle IMP score:", score)
     
     built_system = BuiltSystem(
         model=mdl,
@@ -303,5 +318,6 @@ if __name__ == "__main__":
     # Take the sf_imp and convert it to a JAX-compatible scoring function
     ji = sf_imp._get_jax()
     print(ji)
-    
-    
+    jax_score_func = ji.score_func 
+    jmodel = ji.get_jax_model()
+    print("post-shuffle JAX score:", jax_score_func(jmodel))
