@@ -73,18 +73,17 @@ class BuiltSystem:
                 for bead in beads:
                     f.write(f"{bead}\n")
 
-    def read_in_jax_model(self, jax_model):
+    def read_in_jax_model(self, theta):
         """
-        Update the IMP system with a JAX model.
+        Write a reduced sampling state back into this IMP system.
 
-        The JAX model is assumed to be in the same order as the rigid bodies and
-        beads returned by `rigid_bodies_and_beads()`.
+        `theta` is the {"quaternions", "translations", "bead_coords"} pytree
+        produced/consumed throughout dof_layout.py / state_sync.py -- see
+        doc/design.tex Section 2 for its definition. Delegates to
+        state_sync.apply, which moves each rigid body via its reference frame
+        (rotation + translation) and each flexible bead directly.
         """
-        rigid_bodies, beads = self.rigid_bodies_and_beads()
-        assert len(jax_model) == len(rigid_bodies) + len(beads)
-        for i, rb in enumerate(rigid_bodies):
-            q = jax_model[i]
-            IMP.core.RigidMember(rb).set_quaternion(q)
-        for i, bead in enumerate(beads):
-            pos = jax_model[len(rigid_bodies) + i]
-            IMP.core.XYZ(bead).set_coordinates(pos)
+        from . import dof_layout, state_sync
+
+        layout = dof_layout.build(self)
+        state_sync.apply(theta, layout, self)
