@@ -10,6 +10,8 @@ implemented here, only inputs assembled for BlackJAX and IMP's own JAX
 export.
 """
 
+import logging
+import os
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
@@ -17,7 +19,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from . import custom_rmh, dof_layout, proposals, state_sync
+from . import custom_rmh, dof_layout, gpu_io, logging_config, proposals, state_sync
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,15 +80,37 @@ def run_sampling(
     thin: int = 1,
     sync_back: bool = True,
     verbose: bool = True,
+    rmf_path: Optional[str] = None,
+    stat_path: Optional[str] = None,
+    log_path: Optional[str] = None,
 ) -> Tuple[List[dict], np.ndarray, float]:
-    """Run RMH sampling over a BuiltSystem's rigid bodies/beads.
+    """Run RMH sampling over a BuiltSystem's rigid bodies/beads -- the full
+    pipeline: build the log-posterior and proposal, run BlackJAX, and
+    (optionally) write out an RMF3 trajectory, a stat file, and a run log.
 
-    `mode` selects one of the five planning.md sampling modes (see
-    dof_layout.SAMPLING_MODES): "rotation", "translation", "rigid", "beads",
-    or "all". If `sync_back` is set, the last saved sample is written back
-    into the live IMP model (via state_sync.apply) so it can be inspected or
-    written out with IMP's own RMF3/stat-file tools (see gpu_io.py for a
-    batched, GPU-aware version of that sync-and-write step).
+    This is the single call planning.md asks the wrapper to be: a user's own
+    setup script builds a `BuiltSystem` and an
+    `IMP.core.RestraintsScoringFunction`, then calls this.
+
+    Parameters
+    ----------
+    mode : one of the five planning.md sampling modes (see
+        dof_layout.SAMPLING_MODES): "rotation", "translation", "rigid",
+        "beads", or "all".
+    rmf_path : if given, every saved sample is written as an RMF3 frame
+        (doc/design.tex Section 7 / gpu_io.py), all at once at the end of
+        this call -- true incremental, on-device-buffered flushing every K
+        steps is a tracked follow-up, not yet implemented here.
+    stat_path : stat-file path for the same run; defaults to
+        `rmf_path` with a "_stats.csv" suffix if omitted.
+    log_path : if given, this run's log messages (always including a final
+        acceptance-rate/timing summary, regardless of `verbose`) are also
+        written here, on top of the console.
+    sync_back : only meaningful when `rmf_path` is not given. Writing RMF3
+        frames necessarily stages each state into the live IMP model (that
+        is how IMP's RMF writer works), so when `rmf_path` is given the
+        model ends up holding the last written sample's state regardless of
+        `sync_back`.
 
     Returns
     -------
@@ -93,7 +119,26 @@ def run_sampling(
     log_probs : np.ndarray of log-posterior values at the saved samples.
     acceptance_rate : float
     """
+    run_logger = logging_config.configure_logging(log_path=log_path)
+    run_logger.info(
+        "run_sampling starting: n_steps=%d mode=%s sigma_rotation=%s "
+        "sigma_translation=%s sigma_bead=%s burnin=%d thin=%d",
+        n_steps,
+        mode,
+        sigma_rotation,
+        sigma_translation,
+        sigma_bead,
+        burnin,
+        thin,
+    )
+
     context = build_log_prob(built_system, score_function, prior_fn=prior_fn)
+    run_logger.debug(
+        "Built log-posterior: %d rigid bodies, %d beads (flat_size=%d)",
+        context.layout.n_rigid_bodies,
+        context.layout.n_beads,
+        context.layout.flat_size,
+    )
     proposal_fn = proposals.build_composite(
         context.layout, sigma_rotation, sigma_translation, sigma_bead, mode=mode
     )
@@ -109,7 +154,18 @@ def run_sampling(
         verbose=verbose,
     )
 
-    if sync_back and positions:
+    if rmf_path is not None:
+        resolved_stat_path = stat_path or f"{os.path.splitext(rmf_path)[0]}_stats.csv"
+        with gpu_io.TrajectoryWriter(rmf_path, resolved_stat_path, built_system.root_hier) as writer:
+            gpu_io.write_block(writer, positions, log_probs, context.layout, built_system)
+    elif sync_back and positions:
         state_sync.apply(positions[-1], context.layout, built_system)
+
+    run_logger.info(
+        "run_sampling finished: acceptance_rate=%.1f%% samples_saved=%d%s",
+        100 * acceptance_rate,
+        len(positions),
+        f", rmf={rmf_path}" if rmf_path else "",
+    )
 
     return positions, log_probs, acceptance_rate

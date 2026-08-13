@@ -13,12 +13,15 @@ would reopen the file for every single frame.
 """
 
 import csv
+import logging
 from typing import Sequence
 
 import IMP.pmi.output
 
 from . import state_sync
 from .dof_layout import SystemLayout
+
+logger = logging.getLogger(__name__)
 
 
 class TrajectoryWriter:
@@ -37,6 +40,7 @@ class TrajectoryWriter:
         self._stat_file = open(stat_path, "w", newline="")
         self._stat_writer = csv.writer(self._stat_file)
         self._stat_writer.writerow(["step", "log_prob"])
+        logger.info("Opened trajectory writer: rmf=%s stat=%s", rmf_path, stat_path)
 
     def write_frame(self, step: int, log_prob: float) -> None:
         """Append one RMF3 frame and one stat row for the model's *current* state.
@@ -52,6 +56,7 @@ class TrajectoryWriter:
     def close(self) -> None:
         self._output.close_rmf(self.rmf_path)
         self._stat_file.close()
+        logger.info("Closed trajectory writer: %d frame(s) written to %s", self.n_frames, self.rmf_path)
 
     def __enter__(self) -> "TrajectoryWriter":
         return self
@@ -81,3 +86,4 @@ def write_block(
     for i, (theta, log_prob) in enumerate(zip(positions, log_probs)):
         state_sync.apply(theta, layout, built_system)
         writer.write_frame(step_offset + i, float(log_prob))
+    logger.info("write_block: flushed %d sample(s) starting at step %d", len(positions), step_offset)

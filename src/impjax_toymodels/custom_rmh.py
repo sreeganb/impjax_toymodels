@@ -12,12 +12,15 @@ every step below is exactly `blackjax.rmh(...).step`, mirroring the driving
 loop already used in `rmh_sampler.run_rmh_sampling`.
 """
 
+import logging
 import time
 from typing import Callable, List, Tuple
 
 import blackjax
 import jax
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def run_custom_proposal_rmh(
@@ -62,8 +65,7 @@ def run_custom_proposal_rmh(
     log_probs: List[float] = []
     accepts: List[float] = []
 
-    if verbose:
-        print(f"Running custom-proposal RMH: {n_steps} steps")
+    logger.debug("Running custom-proposal RMH: %d steps", n_steps)
 
     t0 = time.time()
     curr_state = state
@@ -79,16 +81,26 @@ def run_custom_proposal_rmh(
 
         if verbose and (i + 1) % print_every == 0:
             recent_acc = np.mean(accepts[-min(1000, len(accepts)) :])
-            print(
-                f"  Step {i + 1:6d}/{n_steps} | LogProb: {curr_state.logdensity:10.2f} "
-                f"| Accept: {recent_acc:.1%}"
+            logger.info(
+                "Step %6d/%d | LogProb: %10.2f | Accept: %.1f%%",
+                i + 1,
+                n_steps,
+                curr_state.logdensity,
+                100 * recent_acc,
             )
 
     dt = time.time() - t0
     overall_acc = float(np.mean(accepts))
-    if verbose:
-        print(f"Completed in {dt:.2f}s ({n_steps / dt:.0f} steps/s)")
-        print(f"Overall acceptance rate: {overall_acc:.1%}")
-        print(f"Saved {len(positions)} samples")
+    # Always logged (INFO), regardless of `verbose`: this is the run summary
+    # that belongs in a log file even when per-step console progress is off.
+    logger.info(
+        "custom_rmh finished: %d steps in %.2fs (%.0f steps/s), "
+        "acceptance rate %.1f%%, %d samples saved",
+        n_steps,
+        dt,
+        n_steps / dt if dt > 0 else float("inf"),
+        100 * overall_acc,
+        len(positions),
+    )
 
     return positions, np.array(log_probs), overall_acc
