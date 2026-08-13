@@ -123,9 +123,14 @@ def _add_connectivity_restraints(molecules: MoleculesByKey) -> list:
             connectivity = IMP.pmi.restraints.stereochemistry.ConnectivityRestraint(mol)
             connectivity.set_label(f"Connectivity.{mol.get_name()}.{copy_index}")
             connectivity.add_to_model()
-            restraints.append(connectivity.get_restraint())
+#            restraints.append(connectivity.get_restraint())
+            restraints.append(connectivity)
     return restraints
 
+def _add_excluded_volume_restraints(root_hier):
+    evr = IMP.pmi.restraints.stereochemistry.ExcludedVolumeSphere(included_objects=root_hier,
+                                                                    resolution=10)
+    return evr
 
 def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
     """Build the two-protein (KCOIL, ECOIL) toy coiled-coil system.
@@ -160,8 +165,25 @@ def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
         json_path = os.path.join(base_dir, "data", "json_files", f"{protein}.json")
         _build_rigid_bodies_and_flexible_beads(dof, root_hier, json_path, molecules)
 
-    restraints = _add_connectivity_restraints(molecules)
-    score_function = IMP.core.RestraintsScoringFunction(restraints)
+    output_objects = []
+    restraints_set = []
+    cr = _add_connectivity_restraints(molecules)
+    for r in cr:
+        output_objects.append(r)
+        restraints_set.append(r.get_restraint())
+    evr = _add_excluded_volume_restraints(root_hier)
+    output_objects.append(evr)
+    restraints_set.append(evr.get_restraint())
+
+    score_function = IMP.core.RestraintsScoringFunction(restraints_set)
+
+    # Obviously start from random configurations
+    mol_names = []
+    for k, ms in molecules.items():
+        mol_names += ms
+    IMP.pmi.tools.shuffle_configuration(mol_names,
+                                        max_translation=200,
+                                        avoidcollision_rb=True)
 
     built = BuiltSystem(
         model=model,
@@ -171,4 +193,4 @@ def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
         dof=dof,
         molecules=molecules,
     )
-    return built, score_function
+    return built, score_function, output_objects

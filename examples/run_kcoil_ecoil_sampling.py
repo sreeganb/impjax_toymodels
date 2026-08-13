@@ -21,18 +21,20 @@ Outputs (under --output-dir, named by --run-name, default "kcoil_ecoil"):
 
 import argparse
 import os
+import IMP.pmi.macros
 
 import jax
 
 from kcoil_ecoil_system import build_kcoil_ecoil_system
 
 from impjax_toymodels import wrapper_impjax
+from impjax_toymodels import dof_layout
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--copy-number", type=int, default=1, help="copies of each protein (KCOIL, ECOIL)")
-    parser.add_argument("--n-steps", type=int, default=2000, help="number of MCMC steps")
+    parser.add_argument("--n-steps", type=int, default=6000, help="number of MCMC steps")
     parser.add_argument(
         "--mode",
         choices=("rotation", "translation", "rigid", "beads", "all"),
@@ -56,8 +58,9 @@ def main() -> None:
     os.makedirs(args.output_dir, exist_ok=True)
     rmf_path = os.path.join(args.output_dir, f"{args.run_name}.rmf3")
     log_path = os.path.join(args.output_dir, f"{args.run_name}.log")
-
-    built, score_function = build_kcoil_ecoil_system(copy_number=args.copy_number)
+    output_objects = []
+    
+    built, score_function, output_objects = build_kcoil_ecoil_system(copy_number=args.copy_number)
     initial_score = score_function.evaluate(False)  # materializes IMP's JAX export
     print(f"Built KCOIL/ECOIL system: copy_number={args.copy_number}, initial IMP score={initial_score:.4f}")
 
@@ -81,7 +84,40 @@ def main() -> None:
     print(f"  trajectory : {rmf_path}")
     print(f"  stats      : {os.path.splitext(rmf_path)[0]}_stats.csv")
     print(f"  log        : {log_path}")
+    
+    """
+    Now run the IMP replica exchange sampler on the exact same system and the exact same
+    scoring functions. This should give you more context on what happens in 6000 steps.
+    The output from built contains the information needed, but here we have to define some 
+    other necessary parameters.
+    """
+    # calculate the time taken for the IMP replica exchange sampling
+    import time
+    start_time = time.time()
+    print("what is built: ", built)
+    layout = dof_layout.build(built)
+    print("what is this layout: ", built.dof)
+    # Obviously start from random configurations
+    mol_names = []
+    for k, ms in built.molecules.items():
+        mol_names += ms
+    IMP.pmi.tools.shuffle_configuration(mol_names,
+                                        max_translation=200,
+                                        avoidcollision_rb=True)
 
+    #built.dof.optimize_flexible_beads(100)
+    rex=IMP.pmi.macros.ReplicaExchange(built.model,
+                                    root_hier=built.root_hier,           
+                                    monte_carlo_sample_objects=built.dof.get_movers(),
+                                    replica_exchange_maximum_temperature=4.0,
+                                    global_output_directory="output_new/",
+                                    output_objects=output_objects,
+                                    nframes_write_coordinates=1,
+                                    monte_carlo_steps=5,
+                                    number_of_frames=6000,
+                                    number_of_best_scoring_models=1)
+
+    rex.execute_macro()
 
 if __name__ == "__main__":
     main()
