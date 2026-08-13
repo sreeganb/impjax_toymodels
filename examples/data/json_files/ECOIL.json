@@ -1,0 +1,28 @@
+{
+  "uniprot_id": "ECOIL",
+  "protein_name": "ECOIL",
+  "files": {
+    "pdb": "data/pdb/ECOIL.pdb",
+    "fasta": "data/fasta/ECOIL.fasta"
+  },
+  "domains": [
+    [
+      1,
+      21
+    ],
+    [
+      32,
+      52
+    ]
+  ],
+    "oligomerization": false,
+    "monomer_chain" : ["A"],
+    "degrees_of_freedom": "domains",
+  "representation": {
+    "structured": 2,
+    "unstructured": 1
+  },
+  "visualization": {
+    "color": "#0021f3"
+  }
+}

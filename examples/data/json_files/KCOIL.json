@@ -1,0 +1,28 @@
+{
+  "uniprot_id": "KCOIL",
+  "protein_name": "KCOIL",
+  "files": {
+    "pdb": "data/pdb/KCOIL.pdb",
+    "fasta": "data/fasta/KCOIL.fasta"
+  },
+  "domains": [
+    [
+      1,
+      21
+    ],
+    [
+      32,
+      52
+    ]
+  ],
+    "oligomerization": false,
+    "monomer_chain" : ["A"],
+    "degrees_of_freedom": "domains",
+  "representation": {
+    "structured": 2,
+    "unstructured": 1
+  },
+  "visualization": {
+    "color": "#f7754f"
+  }
+}
