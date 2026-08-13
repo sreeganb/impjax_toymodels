@@ -72,3 +72,19 @@ class BuiltSystem:
                 f.write("Flexible beads:\n")
                 for bead in beads:
                     f.write(f"{bead}\n")
+
+    def read_in_jax_model(self, jax_model):
+        """
+        Update the IMP system with a JAX model.
+
+        The JAX model is assumed to be in the same order as the rigid bodies and
+        beads returned by `rigid_bodies_and_beads()`.
+        """
+        rigid_bodies, beads = self.rigid_bodies_and_beads()
+        assert len(jax_model) == len(rigid_bodies) + len(beads)
+        for i, rb in enumerate(rigid_bodies):
+            q = jax_model[i]
+            IMP.core.RigidMember(rb).set_quaternion(q)
+        for i, bead in enumerate(beads):
+            pos = jax_model[len(rigid_bodies) + i]
+            IMP.core.XYZ(bead).set_coordinates(pos)
