@@ -51,14 +51,24 @@ class BuiltSystem:
                 rigid_bodies.append(rb)
         return rigid_bodies, beads
 
-    def describe(self):
+    def describe(self, save_file=False):
         """Print a compact inventory of what was actually built."""
         rigid_bodies, beads = self.rigid_bodies_and_beads()
         print(f"Built system with {len(self.molecule_names)} molecule types")
         for (name, copy_index), mol in sorted(self.molecules.items()):
             n_leaves = len(IMP.core.get_leaves(self.root_hier))
             chain = self.root_hier.get_name()
-            print(f"  {name}.{copy_index:<3d} chain={chain:<4s} beads={n_leaves}")
+            print(f"  {name}.{copy_index} chain={chain} beads={n_leaves}")
         print(f"  rigid bodies  : {len(rigid_bodies)}")
         print(f"  flexible beads: {len(beads)}")
         print(f"  movers        : {len(self.dof.get_movers())}")
+        # If save_file = true, then save the quaternions of rigid bodies and coordinates of 
+        # flexible beads 
+        if save_file:
+            with open("rigid_bodies_and_beads.txt", "w") as f:
+                f.write("Rigid bodies:\n")
+                for rb in rigid_bodies:
+                    f.write(f"{rb}\n")
+                f.write("Flexible beads:\n")
+                for bead in beads:
+                    f.write(f"{bead}\n")

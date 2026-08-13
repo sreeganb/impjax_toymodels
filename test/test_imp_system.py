@@ -9,6 +9,7 @@ try:
     import IMP.pmi.output
     from IMP.pmi.tools import OrderedSet
     import IMP.pmi.tools
+    import IMP.pmi.restraints.stereochemistry
 except ImportError:  # pragma: no cover - environment-dependent
     IMP = None
 
@@ -28,14 +29,16 @@ class BuildIMPSystem:
         self.model = model
         self.system = system
         self.state = state
-        self.molecules = {}
+#        self.molecules = {}
+        self.output_objects = []
         
     def build_component(self, json_file, copy_number = 1):
 
         mols = []
         with open(json_file) as f:
             protein_info = json.load(f)
-
+        
+        repo_dir = os.getcwd()
         
         if protein_info['oligomerization']:
             ch = protein_info['oligomerization_chains']
@@ -46,7 +49,8 @@ class BuildIMPSystem:
             print(chains)
 
         print('Building ...', protein_info['protein_name'])
-        seqs = IMP.pmi.topology.Sequences(os.path.join(os.path.dirname(json_file),protein_info['files']['fasta']))
+        print("file path: ", repo_dir, "fasta file: ", protein_info['files']['fasta'])
+        seqs = IMP.pmi.topology.Sequences(os.path.join(repo_dir, protein_info['files']['fasta']))
         mol = self.state.create_molecule(protein_info['protein_name'],
                                 sequence = seqs['sp'],
                                 chain_id = chains[0])
@@ -98,28 +102,37 @@ class BuildIMPSystem:
 
         return (protein_info["uniprot_id"],protein_info['protein_name']), mols
 
-    def add_connectivity_restraint(self, name = 'Connectivity'):
-        for k, mols in self.molecules.items():
+    def add_connectivity_restraint(self, name = 'Connectivity', molecules = None):
+        print("we are here: add_connectivity_restraint")
+        print("molecules: ", molecules.items())
+        for k, mols in molecules.items():
+            print(f'Adding connectivity restraint for molecule group {k}')
             for mol in mols:
                 copy_number = IMP.atom.Copy(mol.get_hierarchy()).get_copy_index()
                 cr = IMP.pmi.restraints.stereochemistry.ConnectivityRestraint(mol)
                 cr.set_label(f'{name}.{mol.get_name()}.{copy_number}')
                 cr.add_to_model()
-                output_objects.append(cr)
+                self.output_objects.append(cr)
+                print(f'Added connectivity restraint for {mol.get_name()} copy {copy_number}')
+        conn_restraint = cr.get_restraint()
+        return conn_restraint
 
-    def add_excluded_volume_restraint(self, weight = 1., name = 'ExVol'):
+    def add_excluded_volume_restraint(self, weight = 1., name = 'ExVol', root_hier = None, molecules = None):
+        if not hasattr(self, 'output_objects'):
+            self.output_objects = []
 
         mols = []
-        for k, m in self.molecules.items():
+        for k, m in molecules.items():
             mols += m
         print('Excluded volume molecules', mols)
-        evr = IMP.pmi.restraints.stereochemistry.ExcludedVolumeSphere(included_objects=self.root_hier,
+        evr = IMP.pmi.restraints.stereochemistry.ExcludedVolumeSphere(included_objects=root_hier,
                                                                     resolution=10)
         evr.set_label(f'{name}')
         evr.add_to_model()
         evr.set_weight(weight)
-        output_objects.append(evr)
-
+        self.output_objects.append(evr)
+        ev_restraint = evr.get_restraint()
+        return ev_restraint
 
     def write_rmf(self, hier, file_out):
         out = IMP.pmi.output.Output()
@@ -254,11 +267,15 @@ if __name__ == "__main__":
         else:
             print(f"Skipped building DOF for {info[1]}")
     
-    output_objects = []
+    restraints_set = []
         
     mol_names = []
     for k, ms in molecules.items():
         mol_names += ms
+    
+    restraints_set.append(bis.add_connectivity_restraint(molecules=molecules))
+    restraints_set.append(bis.add_excluded_volume_restraint(root_hier=root_hier, molecules=molecules))
+    
     IMP.pmi.tools.shuffle_configuration(mol_names,
                                     max_translation=300,
                                     avoidcollision_rb=True)
@@ -266,7 +283,9 @@ if __name__ == "__main__":
 
     print(molecules)
 
-    #unittest.main()
+    sf_imp = IMP.core.RestraintsScoringFunction(restraints_set)
+    score = sf_imp.evaluate(False)
+    print("Initial score:", score)
     
     built_system = BuiltSystem(
         model=mdl,
@@ -276,4 +295,13 @@ if __name__ == "__main__":
         dof=dof,
         molecules=molecules
     )
-    built_system.describe()
+    built_system.describe(save_file=True)
+    
+    # Separate out the JAX comaptible code here
+    # IMP model and scoring functions can be converted to JAX model and JAX scoring functions
+    # within IMP
+    # Take the sf_imp and convert it to a JAX-compatible scoring function
+    ji = sf_imp._get_jax()
+    print(ji)
+    
+    
