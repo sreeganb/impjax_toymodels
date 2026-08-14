@@ -34,8 +34,8 @@ from impjax_toymodels import dof_layout, state_sync, wrapper_impjax  # noqa: E40
 
 class KcoilEcoilExampleTests(unittest.TestCase):
     def test_build_kcoil_ecoil_system_scales_with_copy_number(self):
-        built1, sf1 = build_kcoil_ecoil_system(copy_number=1)
-        built2, sf2 = build_kcoil_ecoil_system(copy_number=2)
+        built1, sf1, _ = build_kcoil_ecoil_system(copy_number=1)
+        built2, sf2, _ = build_kcoil_ecoil_system(copy_number=2)
 
         layout1 = dof_layout.build(built1)
         layout2 = dof_layout.build(built2)
@@ -49,7 +49,7 @@ class KcoilEcoilExampleTests(unittest.TestCase):
         self.assertTrue(np.isfinite(sf2.evaluate(False)))
 
     def test_full_pipeline_produces_consistent_rmf3_stat_and_log(self):
-        built, score_function = build_kcoil_ecoil_system(copy_number=1)
+        built, score_function, _ = build_kcoil_ecoil_system(copy_number=1)
         score_function.evaluate(False)  # materialize IMP's JAX export
 
         with tempfile.TemporaryDirectory() as tmpdir:
