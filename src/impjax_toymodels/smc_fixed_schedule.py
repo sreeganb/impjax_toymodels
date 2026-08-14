@@ -11,13 +11,12 @@ Reuses smc_base_sampler.py's schedule functions (linear/geometric/sigmoid)
 directly -- they are generic over `n_steps`, nothing flat-vector-specific
 about them. Its `batched_vmap` scoring helper, however, assumes a plain
 `(n_particles, n_dims)` array (`inputs.shape[0]`) and is NOT reusable as-is
-for our pytree particles; rather than modify that already-over-budget file,
-`_pytree_batched_scorer` below is a small, local, pytree-native equivalent
-of the same batching idea. Everything else that assumed a flat array is
-rewritten here to work over an arbitrary pytree state (our
-{"quaternions", "translations", "bead_coords"} theta), so the SO(3)-aware
-proposal from proposals.py can be used as the mutation kernel. No SMC
-algorithm is reimplemented: every tempering/resampling step below is
+for our pytree particles; smc_particles.py holds the pytree-native
+equivalents, shared with the other SMC variants. Everything else that
+assumed a flat array is rewritten here to work over an arbitrary pytree
+state (our {"quaternions", "translations", "bead_coords"} theta), so the
+SO(3)-aware proposal from proposals.py can be used as the mutation kernel.
+No SMC algorithm is reimplemented: every tempering/resampling step below is
 exactly `blackjax.smc.base.step`, and every mutation sweep is exactly
 `blackjax.rmh.build_kernel()`'s kernel function.
 """
@@ -33,6 +32,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .smc_base_sampler import SCHEDULE_REGISTRY
+from .smc_particles import best_particle_selector, particle_count
 from .timing import elapsed_timing, start_timing
 
 logger = logging.getLogger(__name__)
@@ -43,38 +43,6 @@ DEFAULT_N_PARTICLES = 100
 DEFAULT_N_TEMPERATURE_STEPS = 20
 DEFAULT_N_MCMC_STEPS = 10
 DEFAULT_SCHEDULE = "linear"
-
-
-def _particle_count(particles) -> int:
-    """Number of particles from the leading dimension of any pytree leaf."""
-    return jax.tree_util.tree_leaves(particles)[0].shape[0]
-
-
-def _select_particle(particles, index: int):
-    """Pull out a single (unbatched) particle from a batched pytree."""
-    return jax.tree_util.tree_map(lambda leaf: leaf[index], particles)
-
-
-def _pytree_batched_scorer(fn: Callable, batch_size: int) -> Callable:
-    """Pytree-native counterpart to smc_base_sampler.batched_vmap: applies
-    `fn` (single particle -> scalar) to a batched pytree of particles in
-    chunks of `batch_size`, to bound peak memory the same way."""
-    scan_batch = jax.jit(lambda batch: jax.vmap(fn)(batch))
-
-    def scored(particles):
-        n = _particle_count(particles)
-        if n <= batch_size:
-            return scan_batch(particles)
-        results = []
-        for start in range(0, n, batch_size):
-            end = min(start + batch_size, n)
-            chunk = jax.tree_util.tree_map(lambda leaf: leaf[start:end], particles)
-            chunk_result = scan_batch(chunk)
-            jax.block_until_ready(chunk_result)
-            results.append(chunk_result)
-        return jnp.concatenate(results, axis=0)
-
-    return scored
 
 
 def run_fixed_schedule_smc(
@@ -120,7 +88,7 @@ def run_fixed_schedule_smc(
     best_scores : matching list of log_prob_fn values.
     lambdas : the fixed temperature schedule actually used.
     """
-    n_particles = _particle_count(initial_particles)
+    n_particles = particle_count(initial_particles)
 
     schedule_fn = SCHEDULE_REGISTRY.get(schedule)
     if schedule_fn is None:
@@ -128,12 +96,7 @@ def run_fixed_schedule_smc(
     lambdas = schedule_fn(n_temperature_steps)
 
     rmh_kernel = blackjax.rmh.build_kernel()
-    score_batched = _pytree_batched_scorer(log_prob_fn, batch_size=score_batch_size)
-
-    def best_particle(particles):
-        scores = score_batched(particles)
-        idx = int(jnp.argmax(scores))
-        return _select_particle(particles, idx), float(scores[idx])
+    best_particle = best_particle_selector(log_prob_fn, batch_size=score_batch_size)
 
     state = smc_base.init(initial_particles, {})
     best_thetas: List[dict] = []

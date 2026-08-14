@@ -14,6 +14,7 @@ import IMP.atom
 import IMP.core
 import IMP.pmi.dof
 import IMP.pmi.restraints.stereochemistry
+import IMP.pmi.tools
 import IMP.pmi.topology
 
 from impjax_toymodels.system_info import BuiltSystem
@@ -64,3 +65,34 @@ def build_toy_system():
     )
     score_function = IMP.core.RestraintsScoringFunction([connectivity.get_restraint()])
     return built, score_function
+
+
+def build_split_toy_system(shuffle_translation: float = 50.0):
+    """The same toy system, but with its restraints partitioned into a prior
+    set and a likelihood set -- the arrangement priors.restraint_prior exists
+    to serve (connectivity as the structural prior, excluded volume standing
+    in for a data-derived likelihood term).
+
+    The configuration is shuffled first so both terms actually vary: as
+    built, the connectivity restraint sits at exactly 0 and would make every
+    tempering step a no-op.
+
+    Returns
+    -------
+    built : BuiltSystem
+    likelihood_score_function : excluded volume only
+    prior_score_function : connectivity only
+    """
+    built, connectivity_sf = build_toy_system()
+    IMP.pmi.tools.shuffle_configuration(built.root_hier, max_translation=shuffle_translation)
+
+    excluded_volume = IMP.pmi.restraints.stereochemistry.ExcludedVolumeSphere(
+        included_objects=built.root_hier, resolution=1
+    )
+    excluded_volume.add_to_model()
+    likelihood_sf = IMP.core.RestraintsScoringFunction([excluded_volume.get_restraint()])
+
+    # Both must be evaluated once so IMP's JAX export is materialized.
+    likelihood_sf.evaluate(False)
+    connectivity_sf.evaluate(False)
+    return built, likelihood_sf, connectivity_sf

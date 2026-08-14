@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from impjax_toymodels import dof_layout, proposals, smc_fixed_schedule, wrapper_impjax
+from impjax_toymodels import proposals, smc_fixed_schedule, smc_particles, wrapper_impjax
 from toy_fixture import build_toy_system
 
 
@@ -26,19 +26,6 @@ class SmcFixedScheduleTests(unittest.TestCase):
         )
         keys = jax.random.split(key, n_particles)
         return jax.vmap(self.proposal_fn)(keys, replicated)
-
-    def test_particle_count_and_selection_helpers(self):
-        particles = self._initial_particles(7, jax.random.PRNGKey(0))
-        self.assertEqual(smc_fixed_schedule._particle_count(particles), 7)
-        one = smc_fixed_schedule._select_particle(particles, 3)
-        self.assertEqual(one["quaternions"].shape, particles["quaternions"].shape[1:])
-
-    def test_pytree_batched_scorer_matches_plain_vmap(self):
-        particles = self._initial_particles(10, jax.random.PRNGKey(1))
-        scorer = smc_fixed_schedule._pytree_batched_scorer(self.context.log_prob_fn, batch_size=3)
-        batched_scores = np.array(scorer(particles))
-        direct_scores = np.array(jax.vmap(self.context.log_prob_fn)(particles))
-        np.testing.assert_allclose(batched_scores, direct_scores, atol=1e-5)
 
     def test_run_fixed_schedule_smc_returns_one_best_theta_per_step(self):
         n_particles = 12
@@ -68,7 +55,7 @@ class SmcFixedScheduleTests(unittest.TestCase):
         for theta in best_thetas:
             self.assertEqual(theta["quaternions"].shape, self.context.initial_theta["quaternions"].shape)
         # Final SMC particle population still has n_particles members.
-        self.assertEqual(smc_fixed_schedule._particle_count(state.particles), n_particles)
+        self.assertEqual(smc_particles.particle_count(state.particles), n_particles)
 
 
 if __name__ == "__main__":

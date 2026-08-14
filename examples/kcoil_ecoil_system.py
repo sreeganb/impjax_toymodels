@@ -132,21 +132,19 @@ def _add_excluded_volume_restraints(root_hier):
                                                                     resolution=10)
     return evr
 
-def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
-    """Build the two-protein (KCOIL, ECOIL) toy coiled-coil system.
+def _build_system_and_restraints(copy_number: int, data_dir: str):
+    """Shared construction: build the system, then its two restraint families.
 
-    Parameters
-    ----------
-    copy_number : number of copies of *each* protein to build.
-    data_dir : base directory whose "data" subfolder holds json_files/,
-        pdb/, fasta/ (matching each JSON's own "data/..." relative paths,
-        e.g. "data/fasta/KCOIL.fasta"); defaults to the examples/ directory
-        itself, i.e. this file's own examples/data/.
+    Factored out so the system can be handed back either as one combined
+    scoring function (`build_kcoil_ecoil_system`) or as a prior/likelihood
+    partition (`build_kcoil_ecoil_split`), without building it twice or
+    duplicating any of the topology code.
 
     Returns
     -------
     built : system_info.BuiltSystem
-    score_function : IMP.core.RestraintsScoringFunction
+    connectivity : list of PMI connectivity restraint objects (one per copy)
+    excluded_volume : the single PMI excluded-volume restraint object
     """
     base_dir = data_dir or EXAMPLES_DIR
     model = IMP.Model()
@@ -165,17 +163,8 @@ def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
         json_path = os.path.join(base_dir, "data", "json_files", f"{protein}.json")
         _build_rigid_bodies_and_flexible_beads(dof, root_hier, json_path, molecules)
 
-    output_objects = []
-    restraints_set = []
-    cr = _add_connectivity_restraints(molecules)
-    for r in cr:
-        output_objects.append(r)
-        restraints_set.append(r.get_restraint())
-    evr = _add_excluded_volume_restraints(root_hier)
-    output_objects.append(evr)
-    restraints_set.append(evr.get_restraint())
-
-    score_function = IMP.core.RestraintsScoringFunction(restraints_set)
+    connectivity = _add_connectivity_restraints(molecules)
+    excluded_volume = _add_excluded_volume_restraints(root_hier)
 
     # Obviously start from random configurations
     mol_names = []
@@ -193,4 +182,61 @@ def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
         dof=dof,
         molecules=molecules,
     )
+    return built, connectivity, excluded_volume
+
+
+def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
+    """Build the two-protein (KCOIL, ECOIL) toy coiled-coil system.
+
+    Every restraint (connectivity + excluded volume) goes into a single
+    scoring function, so the sampler treats the whole thing as one target
+    with a flat prior. For the restraint-partitioned arrangement instead,
+    see `build_kcoil_ecoil_split`.
+
+    Parameters
+    ----------
+    copy_number : number of copies of *each* protein to build.
+    data_dir : base directory whose "data" subfolder holds json_files/,
+        pdb/, fasta/ (matching each JSON's own "data/..." relative paths,
+        e.g. "data/fasta/KCOIL.fasta"); defaults to the examples/ directory
+        itself, i.e. this file's own examples/data/.
+
+    Returns
+    -------
+    built : system_info.BuiltSystem
+    score_function : IMP.core.RestraintsScoringFunction over all restraints
+    output_objects : PMI restraint objects, for IMP's own stat-file machinery
+    """
+    built, connectivity, excluded_volume = _build_system_and_restraints(copy_number, data_dir)
+
+    output_objects = list(connectivity) + [excluded_volume]
+    restraints_set = [r.get_restraint() for r in connectivity] + [excluded_volume.get_restraint()]
+    score_function = IMP.core.RestraintsScoringFunction(restraints_set)
     return built, score_function, output_objects
+
+
+def build_kcoil_ecoil_split(copy_number: int = 4, data_dir: str = None):
+    """Build the same system with its restraints partitioned prior/likelihood.
+
+    Connectivity goes into its own scoring function to be used as the prior
+    (impjax_toymodels.priors.restraint_prior), excluded volume into another
+    to be used as the tempered likelihood. The two must be disjoint or the
+    posterior would double-count -- which is exactly what this split
+    guarantees, and what priors.restraint_prior checks for.
+
+    In a real study the likelihood side is where the experimental restraints
+    (crosslinks, EM, SAXS) would go; excluded volume stands in for them here
+    because this toy system has no data.
+
+    Returns
+    -------
+    built : system_info.BuiltSystem
+    likelihood_score_function : excluded volume only -- the tempered term
+    prior_score_function : connectivity only -- the untempered structural prior
+    output_objects : PMI restraint objects, for IMP's own stat-file machinery
+    """
+    built, connectivity, excluded_volume = _build_system_and_restraints(copy_number, data_dir)
+
+    likelihood_sf = IMP.core.RestraintsScoringFunction([excluded_volume.get_restraint()])
+    prior_sf = IMP.core.RestraintsScoringFunction([r.get_restraint() for r in connectivity])
+    return built, likelihood_sf, prior_sf, list(connectivity) + [excluded_volume]
