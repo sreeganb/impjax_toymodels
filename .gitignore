@@ -4,6 +4,11 @@ __pycache__/
 *$py.class
 *.rmf3
 
+# Generated sampling run output (examples/run_kcoil_ecoil_sampling.py and IMP
+# ReplicaExchange's own output directory)
+examples/out/
+examples/output_new/
+
 # C extensions
 *.so
 
