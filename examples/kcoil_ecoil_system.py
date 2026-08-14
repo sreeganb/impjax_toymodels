@@ -31,6 +31,7 @@ import IMP.atom
 import IMP.core
 import IMP.pmi.dof
 import IMP.pmi.restraints.stereochemistry
+import IMP.pmi.restraints.basic
 import IMP.pmi.topology
 from IMP.pmi.tools import OrderedSet
 
@@ -132,6 +133,59 @@ def _add_excluded_volume_restraints(root_hier):
                                                                     resolution=10)
     return evr
 
+def _add_distance_restraints(root_hier):
+    """One distance restraint per relevant pair of residues, all returned."""
+    restraints = []
+    # choose residues to apply the distance residue between, for example restraint the
+    # lysine residues in the system so that it mimics crosslinking 
+    # For this system specifically we know the residue numbers of the lysine residues,
+    # so create the tuple and apply it!
+    """
+    chain A GLY 26 -- chain B SER 24 : 4.53 A
+    chain A LEU 5  -- chain B GLU 6  : 5.23 A
+    select these particles and apply distance restraints between them.
+    """
+    m1 = "KCOIL"
+    r1 = 26
+    m2 = "ECOIL"
+    r2 = 24
+    p1 = IMP.atom.Selection(root_hier, state_index=0, molecule=m1, residue_index=r1, resolution=1).get_selected_particles()
+    if not p1:
+        print(f"Warning: No particles found for {m1} residue {r1}")
+    print(p1[0])
+    p2 = IMP.atom.Selection(root_hier, state_index=0, molecule=m2, residue_index=r2, resolution=1).get_selected_particles()
+    if not p2:
+        print(f"Warning: No particles found for {m2} residue {r2}")
+    print(p2[0])
+    print(f"Adding distance restraint between KCOIL {r1} and ECOIL {r2}")
+    
+    tup1 = [r1, r1, m1, 0]
+    tup2 = [r2, r2, m2, 0]
+    disres1 = IMP.pmi.restraints.basic.DistanceRestraint(root_hier, tup1, tup2, 0.0, 4.53, resolution = 1.0, kappa = 1.0)
+    disres1.add_to_model()
+    restraints.append(disres1)
+    r1 = 5
+    r2 = 6
+    m1 = "KCOIL"
+    m2 = "ECOIL"
+    p1 = IMP.atom.Selection(root_hier, state_index=0, molecule=m1, residue_index=r1, resolution=1).get_selected_particles()
+    if not p1:
+        print(f"Warning: No particles found for {m1} residue {r1}")
+    print(p1[0])
+    p2 = IMP.atom.Selection(root_hier, state_index=0, molecule=m2, residue_index=r2, resolution=1).get_selected_particles()
+    if not p2:
+        print(f"Warning: No particles found for {m2} residue {r2}")
+    print(p2[0])
+    print(f"Adding distance restraint between KCOIL {r1} and ECOIL {r2}")
+    
+    tup1 = [r1, r1, m1, 0]
+    tup2 = [r2, r2, m2, 0]
+    disres2 = IMP.pmi.restraints.basic.DistanceRestraint(root_hier, tup1, tup2, 0.0, 5.23, resolution = 1.0, kappa = 1.0)
+    disres2.add_to_model()
+    restraints.append(disres2)
+    
+    return restraints 
+
 def _build_system_and_restraints(copy_number: int, data_dir: str):
     """Shared construction: build the system, then its two restraint families.
 
@@ -165,6 +219,7 @@ def _build_system_and_restraints(copy_number: int, data_dir: str):
 
     connectivity = _add_connectivity_restraints(molecules)
     excluded_volume = _add_excluded_volume_restraints(root_hier)
+    disres = _add_distance_restraints(root_hier)
 
     # Obviously start from random configurations
     mol_names = []
@@ -182,7 +237,7 @@ def _build_system_and_restraints(copy_number: int, data_dir: str):
         dof=dof,
         molecules=molecules,
     )
-    return built, connectivity, excluded_volume
+    return built, connectivity, excluded_volume, disres
 
 
 def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
@@ -207,10 +262,10 @@ def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
     score_function : IMP.core.RestraintsScoringFunction over all restraints
     output_objects : PMI restraint objects, for IMP's own stat-file machinery
     """
-    built, connectivity, excluded_volume = _build_system_and_restraints(copy_number, data_dir)
+    built, connectivity, excluded_volume, disres = _build_system_and_restraints(copy_number, data_dir)
 
-    output_objects = list(connectivity) + [excluded_volume]
-    restraints_set = [r.get_restraint() for r in connectivity] + [excluded_volume.get_restraint()]
+    output_objects = list(connectivity) + [excluded_volume] + disres
+    restraints_set = [r.get_restraint() for r in connectivity] + [excluded_volume.get_restraint()] + [r.get_restraint() for r in disres]
     score_function = IMP.core.RestraintsScoringFunction(restraints_set)
     return built, score_function, output_objects
 
@@ -235,8 +290,8 @@ def build_kcoil_ecoil_split(copy_number: int = 4, data_dir: str = None):
     prior_score_function : connectivity only -- the untempered structural prior
     output_objects : PMI restraint objects, for IMP's own stat-file machinery
     """
-    built, connectivity, excluded_volume = _build_system_and_restraints(copy_number, data_dir)
+    built, connectivity, excluded_volume, disres = _build_system_and_restraints(copy_number, data_dir)
 
     likelihood_sf = IMP.core.RestraintsScoringFunction([excluded_volume.get_restraint()])
     prior_sf = IMP.core.RestraintsScoringFunction([r.get_restraint() for r in connectivity])
-    return built, likelihood_sf, prior_sf, list(connectivity) + [excluded_volume]
+    return built, likelihood_sf, prior_sf, list(connectivity) + [excluded_volume] + disres

@@ -43,8 +43,8 @@ from .timing import elapsed_timing, start_timing
 logger = logging.getLogger(__name__)
 
 DEFAULT_N_PARTICLES = 100
-DEFAULT_N_TEMPERATURE_STEPS = 20
-DEFAULT_N_MCMC_STEPS = 10
+DEFAULT_N_TEMPERATURE_STEPS = 100
+DEFAULT_N_MCMC_STEPS = 20
 DEFAULT_SCHEDULE = "linear"
 
 

@@ -58,6 +58,7 @@ import argparse
 import os
 
 import IMP.pmi.macros
+import IMP.pmi.restraints.basic
 import jax
 
 from kcoil_ecoil_system import build_kcoil_ecoil_split, build_kcoil_ecoil_system

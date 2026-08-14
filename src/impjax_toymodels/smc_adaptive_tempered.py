@@ -51,7 +51,7 @@ from .timing import elapsed_timing, start_timing
 logger = logging.getLogger(__name__)
 
 DEFAULT_N_PARTICLES = 100
-DEFAULT_N_MCMC_STEPS = 10
+DEFAULT_N_MCMC_STEPS = 20
 # Fraction of the population the ESS is held at when picking the next
 # temperature. 0.5 is the standard choice in the SMC literature (Del Moral et
 # al. 2012): high enough that reweighting does not collapse the population
