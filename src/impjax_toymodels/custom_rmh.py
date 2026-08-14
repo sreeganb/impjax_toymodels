@@ -13,12 +13,13 @@ loop already used in `rmh_sampler.run_rmh_sampling`.
 """
 
 import logging
-import time
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import blackjax
 import jax
 import numpy as np
+
+from .timing import elapsed_timing, start_timing
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,8 @@ def run_custom_proposal_rmh(
     burnin: int = 0,
     thin: int = 1,
     verbose: bool = True,
+    step_callback: Optional[Callable[[int, dict, float, bool], None]] = None,
+    step_callback_every: int = 1,
 ) -> Tuple[List, np.ndarray, float]:
     """Run Metropolis sampling on a pytree state with an arbitrary symmetric proposal.
 
@@ -49,6 +52,14 @@ def run_custom_proposal_rmh(
         no Hastings correction term.
     n_steps, burnin, thin : int
         Standard MCMC loop controls, matching rmh_sampler.run_rmh_sampling.
+    step_callback : optional callback, same shape as
+        rmh_sampler.run_rmh_sampling's: `callback(step_index, position,
+        log_prob, is_accepted)`. Used for DEBUG-mode JAX-vs-CPU-IMP score
+        verification (score_verification.py) without this sampler-agnostic
+        driver needing to know anything about IMP.
+    step_callback_every : only invoke `step_callback` every this many steps
+        (default every step, matching rmh_sampler's callback; pass a larger
+        value for expensive callbacks such as a CPU IMP score check).
 
     Returns
     -------
@@ -67,7 +78,7 @@ def run_custom_proposal_rmh(
 
     logger.debug("Running custom-proposal RMH: %d steps", n_steps)
 
-    t0 = time.time()
+    timer = start_timing()
     curr_state = state
     print_every = max(1, n_steps // 10)
 
@@ -79,6 +90,9 @@ def run_custom_proposal_rmh(
             positions.append(jax.tree_util.tree_map(np.array, curr_state.position))
             log_probs.append(float(curr_state.logdensity))
 
+        if step_callback is not None and i % step_callback_every == 0:
+            step_callback(i, curr_state.position, float(curr_state.logdensity), bool(info.is_accepted))
+
         if verbose and (i + 1) % print_every == 0:
             recent_acc = np.mean(accepts[-min(1000, len(accepts)) :])
             logger.info(
@@ -89,16 +103,17 @@ def run_custom_proposal_rmh(
                 100 * recent_acc,
             )
 
-    dt = time.time() - t0
+    elapsed = elapsed_timing(timer)
     overall_acc = float(np.mean(accepts))
     # Always logged (INFO), regardless of `verbose`: this is the run summary
     # that belongs in a log file even when per-step console progress is off.
     logger.info(
-        "custom_rmh finished: %d steps in %.2fs (%.0f steps/s), "
+        "custom_rmh finished: %d steps in %.2fs wall / %.2fs cpu (%.0f steps/s), "
         "acceptance rate %.1f%%, %d samples saved",
         n_steps,
-        dt,
-        n_steps / dt if dt > 0 else float("inf"),
+        elapsed.wall_time,
+        elapsed.cpu_time,
+        n_steps / elapsed.wall_time if elapsed.wall_time > 0 else float("inf"),
         100 * overall_acc,
         len(positions),
     )
