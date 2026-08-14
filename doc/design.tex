@@ -405,6 +405,209 @@ batch-size trade-off already exposed as \texttt{score\_batch\_size} in
 \texttt{smc\_base\_sampler.py}, so \texttt{gpu\_io.py} reuses that naming
 convention for consistency.
 
+\emph{Status (added 2026-08-14):} step 1 above (true on-device
+\texttt{jax.lax.scan} accumulation across a block before a single host
+transfer) is not yet implemented in \texttt{custom\_rmh.py} or
+\texttt{smc\_fixed\_schedule.py} -- both currently pull every saved sample
+to host individually inside a Python loop, then flush the whole
+already-host-side list through \texttt{gpu\_io.write\_block} in one batched
+pass at the end of the run (steps 3-4 above, which \emph{are} implemented).
+This is a tracked follow-up, not a design change.
+
+\section{Fixed-schedule SMC}
+\label{sec:smc}
+
+A second sampler sits alongside the RMH path of Section~\ref{sec:pipeline}:
+Sequential Monte Carlo with a \emph{fixed}, user-specified temperature
+ladder and \emph{no} adaptive tuning of step sizes or schedule spacing --
+the ``base'' SMC sampler, as opposed to a tuned/adaptive-tempered variant
+(reserved for a future, separate file, \texttt{smc\_adaptive\_tempered.py};
+the two must never share a file so one can be swapped or deleted without
+touching the other). Implemented in \texttt{smc\_fixed\_schedule.py}, driven
+from the wrapper via \texttt{wrapper\_impjax.run\_smc\_sampling}.
+
+\subsection{Particle population and tempered target}
+
+SMC maintains a population of $N$ independent copies of the reduced state,
+$\{\theta^{(1)}, \dots, \theta^{(N)}\}$, each an ordinary
+$\theta = (\{q_k,t_k\}, \{x_m\})$ from Section~\ref{sec:state}, batched as a
+pytree with a leading $N$ axis on every leaf. The target at temperature
+$\lambda \in [0,1]$ is
+\[
+  \pi_\lambda(\theta) \;\propto\; p_0(\theta)\, L(\theta)^\lambda, \qquad
+  \log \pi_\lambda(\theta) = \log p_0(\theta) + \lambda \log L(\theta),
+\]
+where $L(\theta) = \exp(-\texttt{score\_func}(\Phi(\theta)))$ is the bare
+IMP-derived likelihood term (Eq.~\eqref{eq:logpost} without any prior mixed
+in) and $p_0$ is the same optional prior as Eq.~\eqref{eq:logpost}. Because
+\texttt{build\_log\_prob}'s \texttt{log\_prob\_fn} already folds the prior
+in, \texttt{wrapper\_impjax.py} exposes a separate
+\texttt{log\_likelihood\_fn} (bare $\log L$) for this tempering split, so a
+supplied prior is not double-counted between the $\lambda=0$ term and the
+$\lambda$-weighted likelihood term.
+
+\subsection{Initial population}
+
+With no informative prior sampler available (the toy models here default to
+$p_0 \equiv 1$), the initial population is built by replicating the
+current IMP-extracted state $N$ times and applying one independent draw of
+the SO(3)-aware proposal (Section~\ref{sec:proposals}) to each copy, so the
+population starts spread out rather than identical:
+\[
+  \theta^{(i)}_0 = \texttt{proposal}(\text{key}_i,\ \theta_{\text{IMP}}), \qquad i = 1,\dots,N.
+\]
+
+\subsection{Algorithm}
+
+Standard SMC (Del Moral et al., 2006), reusing
+\texttt{smc\_base\_sampler.py}'s schedule functions
+(\texttt{SCHEDULE\_REGISTRY}: linear/geometric/sigmoid, generic over array
+shape, imported directly, not reimplemented) and \texttt{blackjax.smc.base}
+for the actual reweight/resample/mutate step -- no SMC algorithm is
+reimplemented. At each step $t$ (schedule value $\lambda_t$):
+\begin{enumerate}
+  \item \textbf{Reweight:} $w_t(\theta) = (\lambda_t - \lambda_{t-1})\log L(\theta)$.
+  \item \textbf{Resample:} systematic resampling
+    (\texttt{blackjax.smc.resampling.systematic}), unmodified.
+  \item \textbf{Mutate:} $n_{\text{mcmc}}$ sweeps of the same symmetric
+    proposal used for RMH, targeting $\pi_{\lambda_t}$, via
+    \texttt{blackjax.rmh.build\_kernel()} vmapped over the $N$ particles --
+    the same no-Hastings-correction argument of
+    Section~\ref{sec:mh}/Proposition~\ref{prop:so3-symmetric} applies
+    unchanged, since the mutation kernel is identical to
+    Section~\ref{sec:proposals}'s.
+\end{enumerate}
+\texttt{blackjax.smc.base.init}/\texttt{step} accept an arbitrary pytree
+population directly (particle count inferred from the leading dimension of
+the first leaf) -- verified against the installed BlackJAX before writing
+this module, not assumed -- so no flattening of $\theta$ is needed here
+either, consistent with Section~\ref{sec:state}. Only
+\texttt{smc\_base\_sampler.py}'s own \texttt{batched\_vmap} scoring helper
+turned out \emph{not} to be reusable (it assumes a plain
+$(N,\text{n\_dims})$ array); \texttt{smc\_fixed\_schedule.py} defines a
+small local pytree-native equivalent rather than editing that file.
+
+\subsection{Best-particle-only output}
+
+Unlike RMH, where every saved sample is written out, SMC output is
+deliberately pruned: at each temperature step (including the initial one)
+the single best-scoring particle,
+$\theta^\star_t = \arg\max_i \log\pi(\theta^{(i)}_t)$ (full, $\lambda=1$
+log-posterior, for reporting), is recorded; the other $N-1$ particles at
+that step are discarded. \texttt{run\_smc\_sampling} writes exactly this
+sequence $\{\theta^\star_0, \dots, \theta^\star_T\}$ through
+\texttt{gpu\_io.write\_block} -- one RMF3 frame per temperature step -- so
+the trajectory shows the best model's progression through the anneal. This
+mirrors IMP's own \texttt{IMP.pmi.macros.ReplicaExchange} with its
+\texttt{number\_of\_best\_scoring\_models} set to 1, which is the natural
+comparison baseline (Section~\ref{sec:comparison}).
+
+\subsection{Untuned defaults}
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Parameter & Default (\texttt{smc\_fixed\_schedule.py}) \\
+\midrule
+$N$ (particles) & 100 \\
+Temperature steps & 20 \\
+Schedule & linear \\
+MCMC sweeps per step & 10 \\
+\bottomrule
+\end{tabular}
+\end{center}
+These are deliberately modest, fixed values -- no adaptive selection -- so
+a comparison run finishes in reasonable time; the adaptive-tempered variant
+(future, separate file) is where per-run tuning belongs.
+
+\section{DEBUG-mode score verification}
+\label{sec:debug}
+
+IMP's CPU scoring implementation is the existing, extensively tested
+ground truth; the JAX export (Section~\ref{sec:bridge}) is the newer
+implementation being verified against it, never the reverse. When
+\texttt{debug=True} (\texttt{run\_sampling}/\texttt{run\_smc\_sampling}),
+every \texttt{debug\_every} steps (RMH) or temperature steps (SMC --
+typically far fewer of them, so the default is every step there) the
+current $\theta$ is synced into the live IMP model
+(\texttt{state\_sync.apply}) and its CPU score compared against the JAX
+score already used for sampling (recovered as $-\log\pi_{\text{JAX}}$,
+undoing Eq.~\eqref{eq:logpost}'s sign), via
+\texttt{score\_verification.ScoreComparisonWriter}. Every checkpoint is
+appended to a CSV (\texttt{step, jax\_score, imp\_score, abs\_diff}); a
+mismatch above $10^{-3}$ (absolute) is logged as a warning. Checking is
+throttled, not per-step, because a CPU \texttt{evaluate()} call is
+comparatively expensive -- checking every step would erase the point of
+sampling on JAX/GPU in the first place.
+
+\emph{Empirical result (2026-08-14):} on the connectivity-only toy system
+of Section~\ref{sec:bridge}, JAX and CPU-IMP scores agree to floating-point
+precision at every checkpoint (measured $|\Delta| = 0$). On the KCOIL/ECOIL
+example system, which additionally includes an excluded-volume restraint,
+IMP itself emits \texttt{"No JAX support for close pairs, so using all
+possible pairs; this may be slow"}, and a small but consistent absolute
+mismatch appears ($\approx 137$ against scores of order $10^6$, i.e.
+$\sim 0.0035\%$ relative, stable across many steps and both samplers). This
+is flagged as a localized, IMP-side JAX-support gap for that specific
+restraint type -- not a defect in this repository's expansion map $\Phi$ or
+state-sync machinery, which is exactly what Section~\ref{sec:expansion}'s
+own regression test already isolates and confirms (perturbing only
+non-sampled rows does not move the score; the discrepancy tracks the
+restraint type, not the sync code).
+
+\section{Timing methodology}
+\label{sec:timing}
+
+All wall/CPU timing in this package goes through \texttt{timing.py}'s
+\texttt{TimingSnapshot} (\texttt{start\_timing}/\texttt{elapsed\_timing}),
+which pairs \texttt{time.perf\_counter()} (monotonic, unaffected by system
+clock adjustments -- the standard choice for wall-clock benchmarking in
+Python) with \texttt{time.process\_time()} (CPU time, excludes time spent
+blocked/sleeping). \texttt{custom\_rmh.py} and \texttt{smc\_fixed\_schedule.py}
+both report both figures at completion; the sampler-comparison example
+(Section~\ref{sec:comparison}) uses the same utility around each sampler
+call rather than ad hoc \texttt{time.time()}.
+
+\section{Sampler comparison}
+\label{sec:comparison}
+
+\texttt{examples/run\_kcoil\_ecoil\_sampling.py} runs and times any
+combination of three samplers on the KCOIL/ECOIL system: BlackJAX RMH
+(\texttt{run\_sampling}), BlackJAX fixed-schedule SMC
+(\texttt{run\_smc\_sampling}), and IMP's own native
+\texttt{IMP.pmi.macros.ReplicaExchange} on an identically-scored system, as
+the ground-truth-\emph{implementation} baseline (distinct from the
+ground-truth-\emph{score} role IMP's CPU scorer plays in
+Section~\ref{sec:debug} -- here the whole sampler, not just the score
+function, is IMP's). Each selected sampler is given its own freshly built
+system: sampling mutates the live IMP model in place, so reusing one system
+across samplers would bias whichever ran second. A comparison table
+(sampler, wall time, CPU time, final/best score) is printed and appended to
+the shared run log.
+
+\begin{assumption}[Cross-sampler start states are not bit-identical]
+IMP's \texttt{shuffle\_configuration} (its own C++ RNG) and BlackJAX's
+\texttt{jax.random.PRNGKey} (a separate PRNG system) cannot be seeded into
+agreement; each sampler's freshly-built system is independently randomized
+with the same \emph{parameters}, not the same starting coordinates.
+Reported timings and final scores should be read as characteristic of each
+sampler's behavior on this system, not as a controlled single-trajectory
+comparison.
+\end{assumption}
+
+\emph{Empirical result (2026-08-14, toy-scale smoke test):} on a
+single-copy KCOIL/ECOIL system with deliberately small step counts, IMP's
+native replica exchange was faster in wall time than either BlackJAX
+sampler ($0.94\mathrm{s}/100$ frames vs.\ $2.31\mathrm{s}/100$ RMH steps and
+$10.70\mathrm{s}$ for a 15-particle, 6-temperature-step SMC run). This is
+expected at this scale: JIT compilation overhead is not yet amortized over
+enough steps, and \texttt{smc\_fixed\_schedule.py}'s per-temperature-step
+retracing of \texttt{update\_fn}/\texttt{weight\_fn} (inherited from
+\texttt{smc\_base\_sampler.py}'s identical pattern) adds further constant
+overhead per step. Whether BlackJAX overtakes IMP's native sampler is
+expected to depend on step count, system size, and GPU availability --
+exactly what this comparison script exists to measure, not to assume.
+
 \section{Module layout}
 \label{sec:modules}
 
@@ -417,8 +620,12 @@ File & Key functions & Depends on \\
 \texttt{dof\_layout.py} & \texttt{build}, \texttt{flatten}, \texttt{unflatten}, \texttt{mode\_mask} & \texttt{system\_info.BuiltSystem} \\
 \texttt{state\_sync.py} & \texttt{extract}, \texttt{expand}, \texttt{apply} & \texttt{dof\_layout} \\
 \texttt{proposals.py} & \texttt{rotation\_step}, \texttt{translation\_step}, \texttt{build\_composite} & \texttt{dof\_layout} \\
-\texttt{wrapper\_impjax.py} & \texttt{build\_log\_prob}, \texttt{run\_sampling} & all of the above, \texttt{rmh\_sampler} \\
-\texttt{gpu\_io.py} & \texttt{DeviceBuffer}, \texttt{flush}, \texttt{write\_frame} & \texttt{state\_sync} \\
+\texttt{custom\_rmh.py} & \texttt{run\_custom\_proposal\_rmh} & \texttt{blackjax.rmh}, \texttt{timing} \\
+\texttt{smc\_fixed\_schedule.py} & \texttt{run\_fixed\_schedule\_smc} & \texttt{smc\_base\_sampler} (schedules only), \texttt{blackjax.smc}, \texttt{timing} \\
+\texttt{score\_verification.py} & \texttt{ScoreComparisonWriter}, \texttt{make\_debug\_callback} & \texttt{state\_sync} \\
+\texttt{logging\_config.py} & \texttt{configure\_logging} & stdlib \texttt{logging} only \\
+\texttt{gpu\_io.py} & \texttt{TrajectoryWriter}, \texttt{write\_block} & \texttt{state\_sync} \\
+\texttt{wrapper\_impjax.py} & \texttt{build\_log\_prob}, \texttt{run\_sampling}, \texttt{run\_smc\_sampling} & all of the above \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -444,12 +651,26 @@ BlackJAX installed together.
     the reduced state $\theta$ and $\log p_0(\theta)$ in
     Eq.~\eqref{eq:logpost} are designed to be extended with an additional
     pytree branch for them without changing the rigid-body/bead machinery.
-  \item Convergence diagnostics (BlackJAX's built-in tools) and the SMC
-    (tempered) variant of this pipeline are intentionally deferred to
-    separate, later, self-contained modules per \texttt{planning.md} --
-    Section~\ref{sec:pipeline}'s algorithm already shows where an SMC
-    variant plugs in without touching \texttt{proposals.py} or
-    \texttt{state\_sync.py}.
+  \item \emph{Update, 2026-08-14:} the fixed-schedule SMC variant is no
+    longer deferred -- see Section~\ref{sec:smc}. Convergence diagnostics
+    (BlackJAX's built-in \texttt{effective\_sample\_size}/
+    \texttt{potential\_scale\_reduction}) remain deferred to a separate,
+    later, self-contained module per \texttt{planning.md}, as does the
+    \emph{adaptive}-tempered SMC variant (Section~\ref{sec:smc}'s
+    reserved, not-yet-written \texttt{smc\_adaptive\_tempered.py}).
+  \item The excluded-volume-related JAX/CPU score mismatch reported in
+    Section~\ref{sec:debug} ($\sim 0.0035\%$ relative) is unresolved and
+    IMP-side (its own warning names the cause: no JAX support for close
+    pairs, so it falls back to all-pairs). Re-run the debug check in
+    Section~\ref{sec:debug} if IMP's JAX support for that restraint changes.
+  \item \texttt{smc\_fixed\_schedule.py} redefines (and therefore retraces)
+    \texttt{update\_fn}/\texttt{weight\_fn} as fresh JIT closures every
+    temperature step, inherited unchanged from
+    \texttt{smc\_base\_sampler.py}'s identical pattern. This is a real,
+    measured performance cost at toy scale (Section~\ref{sec:comparison})
+    and a candidate optimization (e.g.\ closing over $\lambda$ as a traced
+    argument instead of a Python closure constant) if SMC needs to beat
+    RMH/IMP-native timings on larger systems.
 \end{itemize}
 
 \end{document}
