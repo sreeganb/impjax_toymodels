@@ -133,7 +133,7 @@ def _add_excluded_volume_restraints(root_hier):
                                                                     resolution=10)
     return evr
 
-def _add_distance_restraints(root_hier):
+def _add_distance_restraints(copy_number, root_hier):
     """One distance restraint per relevant pair of residues, all returned."""
     restraints = []
     # choose residues to apply the distance residue between, for example restraint the
@@ -145,44 +145,86 @@ def _add_distance_restraints(root_hier):
     chain A LEU 5  -- chain B GLU 6  : 5.23 A
     select these particles and apply distance restraints between them.
     """
-    m1 = "KCOIL"
-    r1 = 26
-    m2 = "ECOIL"
-    r2 = 24
-    p1 = IMP.atom.Selection(root_hier, state_index=0, molecule=m1, residue_index=r1, resolution=1).get_selected_particles()
-    if not p1:
-        print(f"Warning: No particles found for {m1} residue {r1}")
-    print(p1[0])
-    p2 = IMP.atom.Selection(root_hier, state_index=0, molecule=m2, residue_index=r2, resolution=1).get_selected_particles()
-    if not p2:
-        print(f"Warning: No particles found for {m2} residue {r2}")
-    print(p2[0])
-    print(f"Adding distance restraint between KCOIL {r1} and ECOIL {r2}")
-    
-    tup1 = [r1, r1, m1, 0]
-    tup2 = [r2, r2, m2, 0]
-    disres1 = IMP.pmi.restraints.basic.DistanceRestraint(root_hier, tup1, tup2, 0.0, 4.53, resolution = 1.0, kappa = 1.0)
-    disres1.add_to_model()
-    restraints.append(disres1)
-    r1 = 5
-    r2 = 6
-    m1 = "KCOIL"
-    m2 = "ECOIL"
-    p1 = IMP.atom.Selection(root_hier, state_index=0, molecule=m1, residue_index=r1, resolution=1).get_selected_particles()
-    if not p1:
-        print(f"Warning: No particles found for {m1} residue {r1}")
-    print(p1[0])
-    p2 = IMP.atom.Selection(root_hier, state_index=0, molecule=m2, residue_index=r2, resolution=1).get_selected_particles()
-    if not p2:
-        print(f"Warning: No particles found for {m2} residue {r2}")
-    print(p2[0])
-    print(f"Adding distance restraint between KCOIL {r1} and ECOIL {r2}")
-    
-    tup1 = [r1, r1, m1, 0]
-    tup2 = [r2, r2, m2, 0]
-    disres2 = IMP.pmi.restraints.basic.DistanceRestraint(root_hier, tup1, tup2, 0.0, 5.23, resolution = 1.0, kappa = 1.0)
-    disres2.add_to_model()
-    restraints.append(disres2)
+    for i in range(copy_number):
+        m1 = "KCOIL"
+        r1 = 26
+        m2 = "ECOIL"
+        r2 = 24
+        p1 = IMP.atom.Selection(root_hier, state_index=0, molecule=m1, residue_index=r1, resolution=1).get_selected_particles()
+        if not p1:
+            print(f"Warning: No particles found for {m1} residue {r1}")
+        print(p1[0])
+        p2 = IMP.atom.Selection(root_hier, state_index=0, molecule=m2, residue_index=r2, resolution=1).get_selected_particles()
+        if not p2:
+            print(f"Warning: No particles found for {m2} residue {r2}")
+        print(p2[0])
+        print(f"Adding distance restraint between KCOIL {r1} and ECOIL {r2}")
+        
+        tup1 = [r1, r1, m1, i]
+        tup2 = [r2, r2, m2, i]
+        disres1 = IMP.pmi.restraints.basic.DistanceRestraint(root_hier, tup1, tup2, 0.0, 4.53, resolution = 1.0, kappa = 1.0)
+        disres1.add_to_model()
+        restraints.append(disres1)
+
+        r1 = 5
+        r2 = 6
+        m1 = "KCOIL"
+        m2 = "ECOIL"
+        p1 = IMP.atom.Selection(root_hier, state_index=0, molecule=m1, residue_index=r1, resolution=1).get_selected_particles()
+        if not p1:
+            print(f"Warning: No particles found for {m1} residue {r1}")
+        print(p1[0])
+        p2 = IMP.atom.Selection(root_hier, state_index=0, molecule=m2, residue_index=r2, resolution=1).get_selected_particles()
+        if not p2:
+            print(f"Warning: No particles found for {m2} residue {r2}")
+        print(p2[0])
+        print(f"Adding distance restraint between KCOIL {r1} and ECOIL {r2}")
+        
+        tup1 = [r1, r1, m1, i]
+        tup2 = [r2, r2, m2, i]
+        disres2 = IMP.pmi.restraints.basic.DistanceRestraint(root_hier, tup1, tup2, 0.0, 5.23, resolution = 1.0, kappa = 1.0)
+        disres2.add_to_model()
+        restraints.append(disres2)
+        
+        r1 = 12
+        r2 = 13
+        m1 = "KCOIL"
+        m2 = "ECOIL"
+        p1 = IMP.atom.Selection(root_hier, state_index=0, molecule=m1, residue_index=r1, resolution=1).get_selected_particles()
+        if not p1:
+            print(f"Warning: No particles found for {m1} residue {r1}")
+        print(p1[0])
+        p2 = IMP.atom.Selection(root_hier, state_index=0, molecule=m2, residue_index=r2, resolution=1).get_selected_particles()
+        if not p2:
+            print(f"Warning: No particles found for {m2} residue {r2}")
+        print(p2[0])
+        print(f"Adding distance restraint between KCOIL {r1} and ECOIL {r2}")
+        
+        tup1 = [r1, r1, m1, i]
+        tup2 = [r2, r2, m2, i]
+        disres2 = IMP.pmi.restraints.basic.DistanceRestraint(root_hier, tup1, tup2, 0.0, 5.25, resolution = 1.0, kappa = 1.0)
+        disres2.add_to_model()
+        restraints.append(disres2)
+        
+        r1 = 25
+        r2 = 23
+        m1 = "KCOIL"
+        m2 = "ECOIL"
+        p1 = IMP.atom.Selection(root_hier, state_index=0, molecule=m1, residue_index=r1, resolution=1).get_selected_particles()
+        if not p1:
+            print(f"Warning: No particles found for {m1} residue {r1}")
+        print(p1[0])
+        p2 = IMP.atom.Selection(root_hier, state_index=0, molecule=m2, residue_index=r2, resolution=1).get_selected_particles()
+        if not p2:
+            print(f"Warning: No particles found for {m2} residue {r2}")
+        print(p2[0])
+        print(f"Adding distance restraint between KCOIL {r1} and ECOIL {r2}")
+        
+        tup1 = [r1, r1, m1, i]
+        tup2 = [r2, r2, m2, i]
+        disres2 = IMP.pmi.restraints.basic.DistanceRestraint(root_hier, tup1, tup2, 0.0, 4.80, resolution = 1.0, kappa = 1.0)
+        disres2.add_to_model()
+        restraints.append(disres2)
     
     return restraints 
 
@@ -219,7 +261,7 @@ def _build_system_and_restraints(copy_number: int, data_dir: str):
 
     connectivity = _add_connectivity_restraints(molecules)
     excluded_volume = _add_excluded_volume_restraints(root_hier)
-    disres = _add_distance_restraints(root_hier)
+    disres = _add_distance_restraints(copy_number, root_hier)
 
     # Obviously start from random configurations
     mol_names = []
