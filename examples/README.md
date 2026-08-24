@@ -21,50 +21,72 @@ is trying to recover: chain A is exactly `KCOIL.pdb` and chain B is exactly
 "the ground truth" is simply the built system *before* `shuffle_configuration`
 scrambles it.
 
-`generate_distance_restraints.py` measures that structure and writes every
-informative contact to `data/distance_constraints.csv`:
+`generate_distance_restraints.py` measures that structure and writes a
+**sparse, crosslink-like** restraint set to `data/distance_constraints.csv`:
 
 ```bash
-python generate_distance_restraints.py                  # defaults: 12 A cutoff
-python generate_distance_restraints.py --cutoff 8 --force-constant 2.0
+python generate_distance_restraints.py                    # 10 inter + 2 intra per chain
+python generate_distance_restraints.py --top-n 20         # denser
+python generate_distance_restraints.py --residue-types K  # strict lysine-only
 python generate_distance_restraints.py --explicit-copies 4
 ```
 
-The file has one restraint per row:
+Sparse is the point, and not only for realism: **every restraint is a separate
+node in the exported JAX graph**, so the count is a direct cost. Measured on
+this system at `copy_number=1`:
+
+| CSV rows | restraint objects | build+compile | per-eval |
+|---:|---:|---:|---:|
+| 0 | 3 | 0.33 s | 0.046 ms |
+| 14 (default) | 17 | 0.42 s | 0.088 ms |
+| 350 | 353 | 11.8 s | 0.692 ms |
+
+### How pairs are chosen
+
+Candidates are restricted to residues a crosslinker actually reacts with
+(`--residue-types`, default `KS`), ranked by their distance in the reference
+structure, and only the closest `--top-n` are kept. NHS-ester crosslinkers
+(DSS, BS3) target lysine, and both proteins are rich in it — but every lysine
+here sits in a structured domain, and the `GGSGGGSGGG` linker has none at all,
+so a lysine-only dataset would say nothing whatsoever about the flexible
+region. NHS esters also react with serine/threonine/tyrosine hydroxyls, and
+each linker carries serines at residues 24 and 28, which is why `S` is in the
+default set: a few genuine restraints land on the flexible beads instead of
+leaving them data-free. The linker beads are never *repositioned* — their
+conformation still has to emerge from sampling.
+
+Excluded: pairs inside one rigid body (their distance cannot change, so the
+restraint is a constant added to the score) and same-chain pairs closer than
+`--min-seq-sep` residues (already covered by connectivity). Several residues
+can share one coarse bead, so pairs collapsing onto the same bead pair are
+deduplicated.
+
+### File format
 
 ```
 residue1,protein1,copy1,residue2,protein2,copy2,distance,force_constant
-25,KCOIL,*,24,ECOIL,*,4.570,1.000
+24,KCOIL,*,24,ECOIL,*,4.940,1.000
 ```
 
 `copy1`/`copy2` are 0-based PMI copy indexes, or `*` meaning "every copy,
-paired copy-for-copy" -- so one file works unchanged at any `--copy-number`,
-which is the default the generator writes.  Use `--explicit-copies N` to get
-integer copy indexes instead, for restraint sets where different copies of the
-assembly genuinely differ.
+paired copy-for-copy" — so one file works unchanged at any `--copy-number`,
+which is the default the generator writes. Use `--explicit-copies N` for
+integer indexes instead.
+
+Note this makes the synthetic data **more informative than a real experiment**.
+Real crosslinking MS is ambiguous about copies — the spectrum says "a KCOIL
+K20 crosslinked to an ECOIL S28", not which copy — and the correct treatment
+is a soft-min over copy assignments. Assigning each crosslink to a copy by
+fiat is what keeps every restraint a cheap two-particle harmonic. Genuinely
+ambiguous restraints would need a different restraint class and would change
+what `*` means (from "each copy" to "any copy").
 
 `kcoil_ecoil_system.py` reads the file back in and turns each row into a true
 harmonic well at `distance` with force constant `force_constant`
 (`impjax_toymodels.distance_restraints`), so the restraints are *data*, not
-code: a sparser, noisier or differently-weighted set is a different CSV, not a
-different build script.  On the split prior/likelihood path they sit on the
-likelihood side, alongside excluded volume, since they stand in for
-experimental data; connectivity remains the prior.
-
-Pairs inside one rigid body are skipped (their distance cannot change) as are
-same-chain pairs closer than `--min-seq-sep` residues (connectivity already
-covers those).  The generator prints how many restraints tie each pair of
-rigid bodies together, and flags any pair with fewer than the three needed to
-fix a relative pose.
-
-To put a built system back into the reference state -- for a sanity check that
-the ground truth really is the score minimum, or to compare a sampled model
-against it:
-
-```python
-built, sf, _ = build_kcoil_ecoil_system(copy_number=1, shuffle=False)
-place_flexible_beads_at_reference(built)   # linkers have no PDB-derived start
-```
+code. On the split prior/likelihood path they sit on the likelihood side,
+alongside excluded volume, since they stand in for experimental data;
+connectivity remains the prior.
 
 ## Did it recover the ground truth?
 
@@ -78,10 +100,15 @@ python evaluate_recovery.py out/kcoil_ecoil_smc_adaptive.rmf3
 python evaluate_recovery.py out/*.rmf3 --copy-number 2
 ```
 
-With more than one copy each copy is scored separately against the single
-reference dimer and the worst is reported -- the restraint file ties copy i to
-copy i and says nothing across copies, so the copies are free to land anywhere
-relative to each other.
+Only the structured beads are scored: the linker is genuinely flexible and has
+no reference conformation to be right or wrong about. With more than one copy
+each copy is scored separately against the single reference dimer and the
+worst is reported — the restraint file ties copy i to copy i and says nothing
+across copies, so the copies are free to land anywhere relative to each other.
+
+`build_kcoil_ecoil_system(copy_number=1, shuffle=False)` gives you the
+reference state directly, if you want to check that the ground truth really is
+the score minimum.
 
 ## Running the samplers
 
