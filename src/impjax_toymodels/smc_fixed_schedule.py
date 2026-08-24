@@ -114,35 +114,63 @@ def run_fixed_schedule_smc(
         n_mcmc_steps,
     )
 
+    # Both compiled functions are built once, here, outside the temperature
+    # loop -- and the inverse-temperature they depend on is passed in as a
+    # traced argument rather than closed over as a constant.
+    #
+    # Defining them inside the loop instead (as this did) creates a fresh
+    # Python function object on every temperature step, and JAX caches
+    # compiled code by function identity: every single step then paid a full
+    # recompile of the vmapped RMH scan. The symptom is a flat per-step wall
+    # time where a working cache would make step 1 expensive and the rest
+    # nearly free. It is also why this sampler was an order of magnitude
+    # slower than smc_tempered.py, which has always built its kernel once.
+
+    def _tempered_logdensity(theta, lam):
+        """p(theta) * p(D|theta)^lam, in logs -- the tempered target."""
+        return log_prior_fn(theta) + lam * log_likelihood_fn(theta)
+
+    @jax.jit
+    def mutate_fn(keys, particles, lam):
+        """One MCMC sweep block per particle, at inverse temperature `lam`."""
+        def _mutate_one(key, particle):
+            def logdensity(theta):
+                return _tempered_logdensity(theta, lam)
+
+            st = blackjax.rmh.init(particle, logdensity)
+
+            def _body(carry, _):
+                k, s = carry
+                k, subk = jax.random.split(k)
+                s, info = rmh_kernel(subk, s, logdensity, proposal_fn)
+                return (k, s), info.is_accepted
+
+            (_, final_st), accepted = jax.lax.scan(_body, (key, st), jnp.arange(n_mcmc_steps))
+            return final_st.position, jnp.mean(accepted)
+
+        new_particles, accept_rates = jax.vmap(_mutate_one)(keys, particles)
+        return new_particles, {"acceptance_rate": accept_rates}
+
+    @jax.jit
+    def reweight_fn(particles, delta_lam):
+        """Incremental log weight for a step of size `delta_lam`."""
+        return delta_lam * jax.vmap(log_likelihood_fn)(particles)
+
     timer = start_timing()
     for step_idx in range(1, len(lambdas)):
         rng_key, step_key = jax.random.split(rng_key)
-        lam_prev, lam_curr = lambdas[step_idx - 1], lambdas[step_idx]
+        lam_prev, lam_curr = float(lambdas[step_idx - 1]), float(lambdas[step_idx])
         delta_lam = lam_curr - lam_prev
 
-        def _tempered_logdensity(theta, _lam=lam_curr):
-            return log_prior_fn(theta) + _lam * log_likelihood_fn(theta)
+        # blackjax calls update_fn(keys, particles, update_params) and
+        # weight_fn(particles), so this step's lambda has to be bound
+        # somewhere -- into these two throwaway adapters, never into the
+        # compiled functions above.
+        def update_fn(keys, particles, update_params, _lam=lam_curr):
+            return mutate_fn(keys, particles, _lam)
 
-        @jax.jit
-        def update_fn(keys, particles, update_params, _tempered=_tempered_logdensity):
-            def _mutate_one(key, particle):
-                st = blackjax.rmh.init(particle, _tempered)
-
-                def _body(carry, _):
-                    k, s = carry
-                    k, subk = jax.random.split(k)
-                    s, info = rmh_kernel(subk, s, _tempered, proposal_fn)
-                    return (k, s), info.is_accepted
-
-                (_, final_st), accepted = jax.lax.scan(_body, (key, st), jnp.arange(n_mcmc_steps))
-                return final_st.position, jnp.mean(accepted)
-
-            new_particles, accept_rates = jax.vmap(_mutate_one)(keys, particles)
-            return new_particles, {"acceptance_rate": accept_rates}
-
-        @jax.jit
         def weight_fn(particles, _delta=delta_lam):
-            return _delta * jax.vmap(log_likelihood_fn)(particles)
+            return reweight_fn(particles, _delta)
 
         state, info = smc_base.step(step_key, state, update_fn, weight_fn, resampling_fn)
 
