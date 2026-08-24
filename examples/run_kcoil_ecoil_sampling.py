@@ -82,16 +82,20 @@ def build_system_and_prior(args):
     function and only excluded volume is tempered.
     """
     box = priors.bounding_box(half_width=args.prior_box_half_width)
+    # None means "the default file"; benchmark_pipeline.py points this at a
+    # per-copy-number restraint set it generated for the case being run.
+    distance_csv = getattr(args, "distance_csv", None)
 
     if args.prior in ("connectivity", "connectivity+box"):
         built, likelihood_sf, prior_sf, output_objects = build_kcoil_ecoil_split(
-            copy_number=args.copy_number
+            copy_number=args.copy_number, distance_csv=distance_csv
         )
         restraint = priors.restraint_prior(prior_sf)
         prior = restraint if args.prior == "connectivity" else priors.composite(restraint, box)
         return built, likelihood_sf, prior, output_objects
 
-    built, score_function, output_objects = build_kcoil_ecoil_system(copy_number=args.copy_number)
+    built, score_function, output_objects = build_kcoil_ecoil_system(
+        copy_number=args.copy_number, distance_csv=distance_csv)
     return built, score_function, (None if args.prior == "flat" else box), output_objects
 
 
@@ -149,6 +153,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imp-rex-max-temp", type=float, default=4.0)
 
     parser.add_argument("--debug", action="store_true", help="verify JAX vs CPU-IMP scores (rmh/smc only)")
+    parser.add_argument("--distance-csv", default=None,
+                        help="restraint file to use instead of the default "
+                             "data/distance_constraints.csv")
     parser.add_argument("--output-dir", default="out")
     parser.add_argument("--run-name", default="kcoil_ecoil")
     parser.add_argument("--quiet", action="store_true", help="suppress per-step console progress")
@@ -219,7 +226,8 @@ def _run_imp_replica_exchange(args, out_prefix: str, run_logger):
     tempered likelihood versus an untempered prior, so a --prior split would
     not be a like-for-like baseline.
     """
-    built, score_function, output_objects = build_kcoil_ecoil_system(copy_number=args.copy_number)
+    built, score_function, output_objects = build_kcoil_ecoil_system(
+        copy_number=args.copy_number, distance_csv=getattr(args, "distance_csv", None))
     output_dir = f"{out_prefix}_imp_rex"
 
     timer = start_timing()

@@ -88,6 +88,71 @@ code. On the split prior/likelihood path they sit on the likelihood side,
 alongside excluded volume, since they stand in for experimental data;
 connectivity remains the prior.
 
+## Benchmark sweep and PDF report
+
+`benchmark_pipeline.py` is a standalone harness over everything above: it
+sweeps copy numbers and samplers, measures what came out, and writes a single
+multi-page PDF.
+
+```bash
+python benchmark_pipeline.py --config data/benchmark_config.json
+python benchmark_pipeline.py --config data/benchmark_config.json --skip-run   # re-render only
+```
+
+Everything is declared in the JSON — copy numbers, samplers, restraint
+selection, proposal scales, per-sampler step counts, and which ground-truth
+structure and contact map describe each copy number:
+
+```json
+"ground_truth": {
+  "structure":   "data/pdb/kcoil_ecoil.pdb",
+  "contact_map": "data/contact_maps/kcoil_ecoil_n1.csv",
+  "chains":      {"A": ["KCOIL", 0], "B": ["ECOIL", 0]},
+  "per_copy_number": {}
+}
+```
+
+`per_copy_number` is where a genuine N-copy structure goes — `{"2": {...}}`
+overrides the default for that case, which is the path a predicted multi-copy
+model takes. Without an override the single reference assembly is replicated,
+which is what `wildcard_copies` in the restraint block expresses.
+
+Each case gets a **freshly generated restraint set** from its contact map, so
+restraint count is a controlled variable rather than whatever was left in
+`data/`.
+
+### What the report contains
+
+| Page | |
+|---|---|
+| Summary | config, JAX backend, case count, and what the numbers do and don't mean |
+| Accuracy | RMSD to ground truth, every frame in the scoring window, per copy number |
+| IMP score | the same frames re-scored by **IMP on the CPU** |
+| Satisfaction | fraction of restraints within tolerance of their target distance |
+| Scaling | degrees of freedom against wall and CPU time |
+| All results | every number as a table |
+
+The score pages are **IMP's own score, not the BlackJAX log-posterior.** The
+latter is `-S(theta) + log p0(theta)` — a different quantity, and quoting it
+would make BlackJAX and IMP samplers incomparable. Frames are reloaded into an
+IMP model and rescored, which costs ~0.6 ms/frame, so the window is free.
+
+Restraint satisfaction is reported alongside the score because an aggregate
+score can hide two badly violated restraints under a hundred satisfied ones.
+The deviation is recovered from each restraint's own score: the wells are
+`0.5*kappa*(d-d0)^2`, so `|d-d0| = sqrt(2*score/kappa)`.
+
+Every point is one frame, never a mean — for a sampler that returns an
+ensemble the spread *is* the result, and averaging it away hides the
+difference between a converged run and a wandering one.
+
+Colour identifies the sampler in a fixed order and is stable across every
+page. The hues are the first five slots of a palette validated for
+colour-vision deficiency (worst adjacent CVD dE 9.1, normal-vision dE 19.6,
+against targets of 8 and 15); three sit below 3:1 contrast on white, so every
+sampler is also named on the axis or directly labelled, carries its own marker
+shape, and the whole sweep is reproduced as a table.
+
 ## Did it recover the ground truth?
 
 `evaluate_recovery.py` answers that directly, by walking an RMF3 trajectory
