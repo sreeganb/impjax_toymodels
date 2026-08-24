@@ -1,52 +1,62 @@
-"""Derive harmonic distance restraints from the ground-truth KCOIL/ECOIL complex.
+"""Derive a sparse, crosslink-like restraint set from the ground-truth complex.
 
 The point of this toy study is to start from a random configuration and
 recover a structure we already know, so the restraints that drive the sampler
-have to be *measured off* that known structure rather than guessed by hand.
-This script does exactly that and writes the result to
-examples/data/distance_constraints.csv, which kcoil_ecoil_system.py then reads
-back in (see impjax_toymodels.distance_restraints for the file format).
+have to be measured off that structure.  But they also have to *look like data*
+-- a crosslinking-MS experiment hands you a handful of residue pairs, not a
+contact map -- because a dense restraint set both trivialises the inference and
+costs real time: every restraint is a separate node in the exported JAX graph,
+so hundreds of them dominate compile time and slow every score evaluation.
 
-How the target distances are obtained
--------------------------------------
-The system is built exactly as it is for sampling, but with `shuffle=False`,
-so every rigid body still sits on its PDB coordinates -- the ground truth --
-and then `place_flexible_beads_at_reference` moves the linker beads onto their
-reference positions too (PMI stacks them on a placeholder, because no
-structure is read in for the unstructured region).  The result is a built
-system that *is* the reference state.
+This script therefore mimics the chemistry.  Candidate pairs are restricted to
+residues a crosslinker actually reacts with (`--residue-types`, default lysine
+plus serine), ranked by their distance in the reference structure, and only the
+closest `--top-n` are kept.  The result is written to
+data/distance_constraints.csv, which kcoil_ecoil_system.py reads back in (see
+impjax_toymodels.distance_restraints for the format).
 
-Distances are then measured between the actual particles the restraints will
-act on, in that state.  Measuring on the built system rather than
-recomputing centers from the PDB by hand matters: IMP forms a resolution-2
-bead from the mean of its two residue centers, not from the mean of all their
-atoms, and with unequal atom counts per residue the two recipes differ by up
-to ~0.5 A.  Reading the particles directly makes the written distance exactly
-the distance the restraint will see at the ground truth, so the reference
-state sits at the exact minimum of every restraint derived here.
+Why lysine *and* serine here
+----------------------------
+NHS-ester crosslinkers (DSS, BS3) target lysine primary amines, and KCOIL and
+ECOIL are rich in them -- but every one of those lysines is in a structured
+domain.  The GGSGGGSGGG linker between the domains contains no lysine at all,
+so a strictly lysine-only dataset says nothing whatsoever about the flexible
+region.  NHS esters also have well-documented side-reactivity with the
+hydroxyls of serine, threonine and tyrosine, and each linker carries serines at
+residues 24 and 28, so including S puts a few genuine restraints on the
+flexible beads instead of leaving them entirely data-free.  Pass
+`--residue-types K` for the strict lysine-only set.
 
-Which pairs become restraints
------------------------------
-Every bead pair closer than `--cutoff` in the reference structure, minus the
-pairs that carry no information:
+Where the coordinates come from
+-------------------------------
+The system is built exactly as it is for sampling but with `shuffle=False`, so
+the rigid bodies still sit on their PDB coordinates -- the ground truth.  Their
+bead centers are read straight off the built particles, because IMP forms a
+resolution-2 bead from the mean of its two residue centers rather than the mean
+of all their atoms, and with unequal atom counts the two recipes differ by up
+to ~0.5 A here.
 
-* pairs inside the *same rigid body* -- their distance cannot change, so a
-  restraint on them is a constant added to the score;
-* pairs closer than `--min-seq-sep` residues along the same chain -- these
-  merely restate the connectivity restraint that already links consecutive
-  beads.
+The unstructured linker has no structure read into the representation, so PMI
+stacks its beads on a placeholder coordinate; those beads are deliberately left
+where they are, and their reference positions are read from the PDB instead.
+At resolution 1 a linker bead is a single residue, so its center is exactly
+that residue's atom centroid and the two recipes coincide -- no discrepancy to
+worry about, and nothing in the built system gets moved.
 
-What is left is a contact-map-derived restraint set, the standard way to build
-synthetic data for a structure-recovery benchmark, and the coarse-grained
-analogue of a (very complete) crosslinking-MS dataset.
+What is excluded
+----------------
+Pairs inside one rigid body (their distance cannot change, so the restraint is
+a constant added to the score) and same-chain pairs closer than
+`--min-seq-sep` residues (already covered by the connectivity restraint).
+Several residues can share one coarse bead, so pairs that collapse onto the
+same bead pair are deduplicated, keeping the closest.
 """
 
 import argparse
 import itertools
 import os
 import sys
-from collections import Counter
-from typing import List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
@@ -65,98 +75,152 @@ from impjax_toymodels.distance_restraints import (
 
 EXAMPLES_DIR = os.path.dirname(os.path.abspath(__file__))
 
+#: Default crosslinker chemistry: lysine (the real NHS-ester target) plus
+#: serine (documented side-reactivity), the latter being the only reactive
+#: residue anywhere in the flexible linker.
+DEFAULT_RESIDUE_TYPES = "KS"
+
 
 class Bead:
     """One coarse particle, with everything needed to restrain it."""
 
     def __init__(self, protein: str, residues: Sequence[int], rigid_body: str, center):
         self.protein = protein
-        #: All residues represented by this bead; the first is what the CSV
-        #: names, since selecting any of them returns this same particle.
+        #: All residues represented by this bead; the CSV names whichever one
+        #: carried the reactive side chain, since selecting any of them
+        #: returns this same particle.
         self.residues = tuple(residues)
         #: Name of the enclosing rigid body, or "" for a flexible bead.
         self.rigid_body = rigid_body
         self.center = center
 
     @property
-    def residue(self) -> int:
-        return self.residues[0]
+    def body(self) -> str:
+        """Label used in the coverage report."""
+        return self.rigid_body or f"{self.protein}/linker"
 
     def __repr__(self) -> str:
-        kind = self.rigid_body or "flex"
-        return f"{self.protein}:{self.residues[0]}-{self.residues[-1]}({kind})"
+        return f"{self.protein}:{self.residues[0]}-{self.residues[-1]}({self.body})"
 
 
-def collect_beads(root_hier, protein: str) -> List[Bead]:
-    """Enumerate copy 0's beads for one molecule, at their current positions.
+def read_sequence(protein: str, data_dir: str) -> str:
+    """One-letter sequence of `protein`, from the same FASTA the build uses."""
+    info = system_builder._load(
+        os.path.join(data_dir, "data", "json_files", f"{protein}.json"))
+    letters = []
+    with open(os.path.join(data_dir, info["files"]["fasta"])) as handle:
+        for line in handle:
+            if not line.startswith(">"):
+                letters.append(line.strip())
+    return "".join(letters)
 
-    The caller is responsible for having put the system in the reference state
-    first; this just reads coordinates off the particles.
+
+def reference_linker_centers(protein: str, data_dir: str) -> Dict[int, np.ndarray]:
+    """Per-residue centroid from the reference PDB, for the flexible beads.
+
+    Only consulted for single-residue beads, where the centroid of the
+    residue's atoms is exactly the center IMP would place.
+    """
+    info = system_builder._load(
+        os.path.join(data_dir, "data", "json_files", f"{protein}.json"))
+    chain = info["monomer_chain"][0]
+    atoms: Dict[int, List[List[float]]] = {}
+    with open(os.path.join(data_dir, info["files"]["pdb"])) as handle:
+        for line in handle:
+            if line.startswith("ATOM") and line[21] == chain:
+                atoms.setdefault(int(line[22:26]), []).append(
+                    [float(line[30:38]), float(line[38:46]), float(line[46:54])])
+    return {residue: np.mean(coords, axis=0) for residue, coords in atoms.items()}
+
+
+def collect_beads(root_hier, protein: str, data_dir: str) -> Dict[int, Bead]:
+    """Map every residue of copy 0 to its bead, at ground-truth coordinates.
 
     Only copy 0 is walked: every copy has an identical representation, and the
     restraints are written once per assembly and expanded over copies at load
-    time (or by --explicit-copies below).
+    time (or by --explicit-copies).
     """
     particles = IMP.atom.Selection(
-        root_hier, molecule=protein, copy_index=0, resolution=1
-    ).get_selected_particles()
+        root_hier, molecule=protein, copy_index=0, resolution=1).get_selected_particles()
+    linker_centers = reference_linker_centers(protein, data_dir)
 
-    beads = []
+    by_residue: Dict[int, Bead] = {}
     for particle in particles:
         if IMP.atom.Fragment.get_is_setup(particle):
             residues = [int(r) for r in IMP.atom.Fragment(particle).get_residue_indexes()]
         else:
             residues = [IMP.atom.Residue(particle).get_index()]
-        rigid_body = ""
+
         if IMP.core.RigidMember.get_is_setup(particle):
             rigid_body = IMP.core.RigidMember(particle).get_rigid_body().get_name()
-        center = np.array(IMP.core.XYZ(particle).get_coordinates())
-        beads.append(Bead(protein, residues, rigid_body, center))
-    return beads
+            center = np.array(IMP.core.XYZ(particle).get_coordinates())
+        else:
+            # Flexible bead: left untouched in the model, so take its reference
+            # position from the PDB rather than from the placeholder it sits on.
+            rigid_body = ""
+            if len(residues) != 1:
+                raise ValueError(
+                    f"{protein}: flexible bead spans {residues}; the reference "
+                    "position is only exact for single-residue beads")
+            if residues[0] not in linker_centers:
+                raise ValueError(
+                    f"{protein}: reference PDB has no residue {residues[0]}")
+            center = linker_centers[residues[0]]
+
+        bead = Bead(protein, residues, rigid_body, center)
+        for residue in residues:
+            by_residue[residue] = bead
+    return by_residue
 
 
-def select_pairs(beads: Sequence[Bead], cutoff: float, min_seq_sep: int
-                 ) -> List[Tuple[Bead, Bead, float]]:
-    """Ground-truth contacts that actually constrain the degrees of freedom."""
-    selected = []
-    for first, second in itertools.combinations(beads, 2):
-        if first.rigid_body and first.rigid_body == second.rigid_body:
+def candidate_pairs(beads1: Dict[int, Bead], residues1: Sequence[int],
+                    beads2: Dict[int, Bead], residues2: Sequence[int],
+                    min_seq_sep: int, same_molecule: bool
+                    ) -> List[Tuple[float, int, Bead, int, Bead]]:
+    """Reactive-residue pairs, distance-ranked and deduplicated by bead pair."""
+    best: Dict[Tuple[int, int], Tuple[float, int, Bead, int, Bead]] = {}
+    combinations = (itertools.combinations(residues1, 2) if same_molecule
+                    else itertools.product(residues1, residues2))
+    for residue1, residue2 in combinations:
+        bead1 = beads1[residue1]
+        bead2 = (beads1 if same_molecule else beads2)[residue2]
+        if bead1 is bead2:
+            continue
+        if bead1.rigid_body and bead1.rigid_body == bead2.rigid_body:
             continue  # frozen distance: carries no information
-        if first.protein == second.protein:
-            separation = min(abs(a - b)
-                             for a in first.residues for b in second.residues)
-            if separation < min_seq_sep:
-                continue  # already covered by the connectivity restraint
-        distance = float(np.linalg.norm(first.center - second.center))
-        if distance <= cutoff:
-            selected.append((first, second, distance))
-    return sorted(selected, key=lambda item: item[2])
+        if same_molecule and min(abs(a - b) for a in bead1.residues
+                                 for b in bead2.residues) < min_seq_sep:
+            continue  # already covered by the connectivity restraint
+        distance = float(np.linalg.norm(bead1.center - bead2.center))
+        # Several reactive residues can share one bead; keep the closest, so a
+        # single bead pair never contributes two near-identical restraints.
+        key = (id(bead1), id(bead2))
+        if key not in best or distance < best[key][0]:
+            best[key] = (distance, residue1, bead1, residue2, bead2)
+    return sorted(best.values(), key=lambda item: item[0])
 
 
-def report_coverage(pairs: Sequence[Tuple[Bead, Bead, float]]) -> None:
-    """Print how many restraints tie each pair of rigid bodies together.
-
-    A rigid body needs at least three non-degenerate distances to another body
-    to be positioned and oriented relative to it, so a pair count below three
-    is a warning that the cutoff is too tight for the structure to be
-    recoverable, however many restraints there are in total.
-    """
-    counts: Counter = Counter()
-    for first, second, _ in pairs:
-        key = tuple(sorted((first.rigid_body or f"{first.protein}/linker",
-                            second.rigid_body or f"{second.protein}/linker")))
-        counts[key] += 1
-    print("\nrestraints per body pair (>= 3 needed to fix a relative pose):")
-    for (left, right), count in sorted(counts.items()):
-        flag = "" if count >= 3 or "linker" in left + right else "   <-- UNDER-DETERMINED"
-        print(f"  {left:22s} -- {right:22s} {count:5d}{flag}")
+def report_selection(selected, label: str) -> None:
+    """Print what was chosen and which bodies it ties together."""
+    print(f"\n{label}: {len(selected)} restraint(s)")
+    for distance, residue1, bead1, residue2, bead2 in selected:
+        flexible = "*" if not (bead1.rigid_body and bead2.rigid_body) else " "
+        print(f"  {flexible} {bead1.protein} {residue1:>3d} -- "
+              f"{bead2.protein} {residue2:>3d} : {distance:6.2f} A   "
+              f"[{bead1.body} -- {bead2.body}]")
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--cutoff", type=float, default=12.0,
-                        help="max ground-truth bead-bead distance to restrain, in A "
-                             "(default: %(default)s)")
+    parser.add_argument("--top-n", type=int, default=10,
+                        help="inter-molecular restraints per copy pair, taken as the "
+                             "closest reactive-residue pairs (default: %(default)s)")
+    parser.add_argument("--top-n-intra", type=int, default=2,
+                        help="intra-molecular restraints per protein, tying its two "
+                             "domains together (default: %(default)s)")
+    parser.add_argument("--residue-types", default=DEFAULT_RESIDUE_TYPES,
+                        help="one-letter codes the crosslinker reacts with "
+                             "(default: %(default)s; use K for lysine only)")
     parser.add_argument("--min-seq-sep", type=int, default=3,
                         help="skip same-chain pairs closer than this many residues, "
                              "since connectivity already covers them (default: %(default)s)")
@@ -165,8 +229,7 @@ def main(argv=None) -> int:
                              "(default: %(default)s)")
     parser.add_argument("--explicit-copies", type=int, default=None,
                         help="write integer copy indexes for this many copies instead "
-                             "of the copy-agnostic '*' wildcard; use when different "
-                             "copies need different restraints")
+                             "of the copy-agnostic '*' wildcard")
     parser.add_argument("--data-dir", default=EXAMPLES_DIR,
                         help="base directory holding data/ (default: examples/)")
     parser.add_argument("--output", default=None,
@@ -174,40 +237,54 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     output = args.output or os.path.join(args.data_dir, system_builder.DEFAULT_DISTANCE_CSV)
+    reactive_types = set(args.residue_types.upper())
 
     # shuffle=False keeps the rigid bodies on their PDB coordinates and
     # distance_csv=False stops the builder demanding the file we are about to
     # write.  One copy is enough: copies are identical by construction.
     built, _, _ = system_builder.build_kcoil_ecoil_system(
         copy_number=1, data_dir=args.data_dir, shuffle=False, distance_csv=False)
-    moved = system_builder.place_flexible_beads_at_reference(built, args.data_dir)
-    print(f"placed {moved} flexible beads at their reference positions")
 
-    beads: List[Bead] = []
+    beads, reactive = {}, {}
     for protein in system_builder.PROTEINS:
-        beads.extend(collect_beads(built.root_hier, protein))
+        beads[protein] = collect_beads(built.root_hier, protein, args.data_dir)
+        sequence = read_sequence(protein, args.data_dir)
+        reactive[protein] = [index for index, letter in enumerate(sequence, start=1)
+                             if letter in reactive_types]
+        in_linker = [r for r in reactive[protein] if not beads[protein][r].rigid_body]
+        print(f"{protein}: {len(reactive[protein])} reactive residue(s) "
+              f"[{args.residue_types}], {len(in_linker)} of them in the flexible linker")
 
-    print(f"{len(beads)} beads across {len(system_builder.PROTEINS)} proteins")
-    pairs = select_pairs(beads, args.cutoff, args.min_seq_sep)
-    print(f"{len(pairs)} ground-truth contacts within {args.cutoff} A "
-          f"(min seq sep {args.min_seq_sep})")
-    if not pairs:
-        parser.error("no contacts selected -- increase --cutoff")
-    report_coverage(pairs)
+    first, second = system_builder.PROTEINS
+    inter = candidate_pairs(beads[first], reactive[first],
+                            beads[second], reactive[second],
+                            args.min_seq_sep, same_molecule=False)[:args.top_n]
+    report_selection(inter, f"{first} <-> {second} (* = involves a flexible bead)")
+
+    selected = list(inter)
+    for protein in system_builder.PROTEINS:
+        intra = candidate_pairs(beads[protein], reactive[protein],
+                                beads[protein], reactive[protein],
+                                args.min_seq_sep, same_molecule=True)[:args.top_n_intra]
+        report_selection(intra, f"{protein} internal")
+        selected.extend(intra)
+
+    if not selected:
+        parser.error("no restraints selected -- widen --residue-types or raise --top-n")
 
     copy_indexes = ([(i, i) for i in range(args.explicit_copies)]
                     if args.explicit_copies else [(ANY_COPY, ANY_COPY)])
     constraints = [
         DistanceConstraint(
-            residue1=first.residue, protein1=first.protein, copy1=copy1,
-            residue2=second.residue, protein2=second.protein, copy2=copy2,
+            residue1=residue1, protein1=bead1.protein, copy1=copy1,
+            residue2=residue2, protein2=bead2.protein, copy2=copy2,
             distance=distance, force_constant=args.force_constant,
         )
         for copy1, copy2 in copy_indexes
-        for first, second, distance in pairs
+        for distance, residue1, bead1, residue2, bead2 in selected
     ]
     write_distance_constraints(output, constraints)
-    print(f"\nwrote {len(constraints)} restraints to {output}")
+    print(f"\nwrote {len(constraints)} restraint(s) to {output}")
     return 0
 
 
