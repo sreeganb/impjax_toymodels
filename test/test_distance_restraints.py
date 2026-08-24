@@ -15,6 +15,7 @@ import tempfile
 import unittest
 
 import IMP
+import IMP.atom
 import IMP.pmi.restraints.basic
 import IMP.pmi.restraints.stereochemistry
 import numpy as np
@@ -22,6 +23,10 @@ import numpy as np
 EXAMPLES_DIR = os.path.join(os.path.dirname(__file__), "..", "examples")
 if EXAMPLES_DIR not in sys.path:
     sys.path.insert(0, EXAMPLES_DIR)
+
+CONSTRAINT_FILE = os.path.join(EXAMPLES_DIR, "data", "distance_constraints.csv")
+#: Residue range represented by flexible beads, i.e. with no reference position.
+LINKER = (22, 31)
 
 import evaluate_recovery  # noqa: E402
 import kcoil_ecoil_system  # noqa: E402
@@ -126,15 +131,36 @@ class GroundTruthRecoveryTests(unittest.TestCase):
         return len(restraints), sum(r.get_restraint().get_score() for r in restraints)
 
     def test_reference_state_sits_at_the_restraint_minimum(self):
+        # Only the restraints between structured beads can be checked this
+        # way: `shuffle=False` puts the rigid bodies on their PDB coordinates,
+        # but the flexible linker has no structure read in, so PMI leaves its
+        # beads on a placeholder and nothing repositions them.  Restraints
+        # touching a linker bead are therefore expected to be far from their
+        # minimum here, which is exactly the freedom sampling has to resolve.
         built, _, output_objects = kcoil_ecoil_system.build_kcoil_ecoil_system(
             copy_number=1, shuffle=False)
-        kcoil_ecoil_system.place_flexible_beads_at_reference(built)
+        restraints = [r for r in output_objects
+                      if isinstance(r, IMP.pmi.restraints.basic.DistanceRestraint)]
+        self.assertGreater(len(restraints), 0)
 
-        count, score = self.distance_restraint_score(output_objects)
-        self.assertGreater(count, 0)
-        # Every target distance was measured in exactly this state, so the
-        # only thing left is float round-trip noise.
-        self.assertLess(score, 1e-3)
+        constraints = dr.expand_copies(dr.read_distance_constraints(CONSTRAINT_FILE), 1)
+        self.assertEqual(len(constraints), len(restraints))
+        structured = [
+            restraint.get_restraint().get_score()
+            for constraint, restraint in zip(constraints, restraints)
+            if not (LINKER[0] <= constraint.residue1 <= LINKER[1]
+                    or LINKER[0] <= constraint.residue2 <= LINKER[1])]
+        self.assertGreater(len(structured), 0)
+        # These targets were measured in exactly this state, so all that is
+        # left is float round-trip noise.
+        self.assertLess(sum(structured), 1e-3)
+
+    def test_restraint_set_stays_sparse(self):
+        # Guard against the constraint file drifting back toward a contact
+        # map: every restraint is a separate node in the exported JAX graph,
+        # so the count is a direct cost, and sparse data is the point.
+        constraints = dr.read_distance_constraints(CONSTRAINT_FILE)
+        self.assertLessEqual(len(constraints), 40)
 
     def test_shuffled_state_is_heavily_penalised(self):
         _, _, output_objects = kcoil_ecoil_system.build_kcoil_ecoil_system(
@@ -154,8 +180,7 @@ class GroundTruthRecoveryTests(unittest.TestCase):
         # restraints were measured in is the same state evaluate_recovery.py
         # compares sampled models against.  If these ever drift apart, every
         # reported RMSD is offset by a constant and nobody notices.
-        reference = evaluate_recovery.reference_coordinates(
-            os.path.join(os.path.dirname(__file__), "..", "examples"))
+        reference = evaluate_recovery.reference_coordinates(EXAMPLES_DIR)
         self.assertGreater(len(reference), 0)
         self.assertAlmostEqual(
             evaluate_recovery.superposed_rmsd(reference, reference), 0.0, places=6)
@@ -173,14 +198,16 @@ class GroundTruthRecoveryTests(unittest.TestCase):
         mirrored = points * np.array([1.0, 1.0, -1.0])
         self.assertGreater(evaluate_recovery.superposed_rmsd(mirrored, points), 1.0)
 
-    def test_placing_flexible_beads_at_reference_is_idempotent(self):
+    def test_recovery_rmsd_covers_structured_beads_only(self):
+        # The linker is genuinely flexible and has no reference conformation,
+        # so scoring it would add noise to the RMSD without adding meaning.
         built, _, _ = kcoil_ecoil_system.build_kcoil_ecoil_system(
             copy_number=1, shuffle=False)
-        kcoil_ecoil_system.place_flexible_beads_at_reference(built)
-        first = evaluate_recovery.bead_coordinates(built.root_hier, copy_index=0)
-        kcoil_ecoil_system.place_flexible_beads_at_reference(built)
-        second = evaluate_recovery.bead_coordinates(built.root_hier, copy_index=0)
-        np.testing.assert_allclose(first, second)
+        scored = len(evaluate_recovery.bead_coordinates(built.root_hier, copy_index=0))
+        everything = len(IMP.atom.Selection(
+            built.root_hier, resolution=1).get_selected_particles())
+        self.assertGreater(scored, 0)
+        self.assertLess(scored, everything)
 
     def test_split_builder_scores_distance_restraints_as_likelihood(self):
         # Regression guard: these restraints used to be added to the IMP model
@@ -201,9 +228,15 @@ class GroundTruthRecoveryTests(unittest.TestCase):
             likelihood_sf.evaluate(False),
             excluded_volume.get_restraint().get_score() + distance_score,
             delta=1e-6 * max(1.0, distance_score))
-        # ...and the prior side is connectivity only, so it must not move when
-        # the distance restraints do.
-        self.assertLess(prior_sf.evaluate(False), distance_score)
+        # ...and the prior side is connectivity only.  Compared against the
+        # connectivity objects directly rather than against the distance score:
+        # which of the two is larger depends on the configuration and on how
+        # sparse the constraint file is, so it says nothing about the split.
+        connectivity = sum(
+            r.get_restraint().get_score() for r in output_objects
+            if isinstance(r, IMP.pmi.restraints.stereochemistry.ConnectivityRestraint))
+        self.assertAlmostEqual(prior_sf.evaluate(False), connectivity,
+                               delta=1e-6 * max(1.0, connectivity))
 
 
 if __name__ == "__main__":

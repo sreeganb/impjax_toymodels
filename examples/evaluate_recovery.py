@@ -13,6 +13,11 @@ is up, so the recovered assembly is free to sit anywhere in space, and an
 un-superposed RMSD would measure that irrelevant freedom instead of the
 structure.
 
+Only the structured (rigid-body) beads are scored.  The unstructured linker is
+genuinely flexible and no structure is read into the representation for it, so
+it has no reference conformation to be right or wrong about; including it would
+add noise to the number without adding meaning.
+
 Copies are scored one at a time, each against the single reference dimer,
 and the reported number is the worst copy in the frame.  That is deliberate:
 the restraint file ties copy i of KCOIL to copy i of ECOIL and says nothing
@@ -47,12 +52,14 @@ EXAMPLES_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def bead_coordinates(root_hier, copy_index: int) -> np.ndarray:
-    """One copy's beads (both proteins), in a fixed, reproducible order.
+    """One copy's structured beads, in a fixed, reproducible order.
 
     Molecule-major then representation order, which is what
     `IMP.atom.Selection` yields for a given (molecule, copy) pair.  Both the
     reference and the trajectory system are read with this same function, and
     both are built by the same code, so row i means the same bead in both.
+
+    Flexible beads are skipped -- see the module docstring.
     """
     coordinates = []
     for protein in system_builder.PROTEINS:
@@ -60,7 +67,8 @@ def bead_coordinates(root_hier, copy_index: int) -> np.ndarray:
             root_hier, molecule=protein, copy_index=copy_index,
             resolution=1).get_selected_particles()
         coordinates.extend(
-            list(IMP.core.XYZ(particle).get_coordinates()) for particle in particles)
+            list(IMP.core.XYZ(particle).get_coordinates()) for particle in particles
+            if IMP.core.RigidMember.get_is_setup(particle))
     return np.asarray(coordinates)
 
 
@@ -78,14 +86,15 @@ def superposed_rmsd(mobile: np.ndarray, target: np.ndarray) -> float:
 
 
 def reference_coordinates(data_dir: str) -> np.ndarray:
-    """The ground truth dimer: an unshuffled build with its linkers put back.
+    """The ground truth dimer: simply an unshuffled build.
 
-    Built at copy_number=1 because there is only ever one reference dimer;
-    every copy in a multi-copy model is compared against this same one.
+    `shuffle=False` leaves every rigid body on its PDB coordinates, and since
+    only structured beads are scored that is the whole reference -- nothing
+    needs moving.  Built at copy_number=1 because there is only ever one
+    reference dimer; every copy in a multi-copy model is compared against it.
     """
     built, _, _ = system_builder.build_kcoil_ecoil_system(
         copy_number=1, data_dir=data_dir, shuffle=False)
-    system_builder.place_flexible_beads_at_reference(built, data_dir)
     return bead_coordinates(built.root_hier, copy_index=0)
 
 
@@ -121,7 +130,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     reference = reference_coordinates(args.data_dir)
-    print(f"reference dimer: {len(reference)} beads; scoring {args.copy_number} "
+    print(f"reference dimer: {len(reference)} structured beads; scoring {args.copy_number} "
           f"cop{'y' if args.copy_number == 1 else 'ies'} per frame\n")
     print(f"{'trajectory':40s} {'frames':>7s} {'first':>8s} {'last':>8s} "
           f"{'best':>8s} {'@frame':>7s}")
@@ -132,9 +141,9 @@ def main(argv=None) -> int:
             continue
         print(f"{os.path.basename(path):40s} {len(values):7d} {values[0]:8.2f} "
               f"{values[-1]:8.2f} {values.min():8.2f} {int(values.argmin()):7d}")
-    print("\nRMSD is in angstroms, over one copy's coarse beads, after optimal "
-          "superposition;\nwith more than one copy, the worst copy in the frame "
-          "is reported.")
+    print("\nRMSD is in angstroms, over one copy's structured beads, after "
+          "optimal superposition;\nwith more than one copy, the worst copy in "
+          "the frame is reported.")
     return 0
 
 

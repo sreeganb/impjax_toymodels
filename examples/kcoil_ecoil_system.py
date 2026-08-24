@@ -31,7 +31,6 @@ import os
 from typing import Dict, List, Tuple
 
 import IMP
-import IMP.algebra
 import IMP.atom
 import IMP.core
 import IMP.pmi.dof
@@ -166,70 +165,6 @@ def _add_distance_restraints(root_hier, copy_number: int, csv_path: str) -> list
     return distance_restraints.load_and_add(root_hier, csv_path, copy_number)
 
 
-def reference_residue_centers(protein: str, data_dir: str = None) -> dict:
-    """Per-residue centroid of `protein`'s reference (ground-truth) PDB chain.
-
-    A plain, unweighted mean over the residue's atoms, keyed by residue index.
-    This is the ground truth the whole inference is trying to recover: the two
-    per-protein PDBs are the two chains of the reference complex, so they are
-    already in a common frame and no superposition is involved anywhere.
-    """
-    base_dir = data_dir or EXAMPLES_DIR
-    info = _load(os.path.join(base_dir, "data", "json_files", f"{protein}.json"))
-    chain = info["monomer_chain"][0]
-    atoms = {}
-    with open(os.path.join(base_dir, info["files"]["pdb"])) as handle:
-        for line in handle:
-            if line.startswith("ATOM") and line[21] == chain:
-                atoms.setdefault(int(line[22:26]), []).append(
-                    (float(line[30:38]), float(line[38:46]), float(line[46:54])))
-    return {residue: IMP.algebra.Vector3D(
-                *[sum(axis) / len(coords) for axis in zip(*coords)])
-            for residue, coords in atoms.items()}
-
-
-def place_flexible_beads_at_reference(built: BuiltSystem, data_dir: str = None) -> int:
-    """Move every flexible bead onto its reference-structure position.
-
-    Only the *structured* domains are read out of the PDB when the system is
-    built, so PMI has nothing to place the linker beads (residues 22-31) with
-    and stacks them all on a single placeholder coordinate.  The reference
-    complex does have coordinates for those residues, so the built system is
-    at the ground truth for its rigid bodies but not for its linkers.
-
-    This closes that gap, turning a `shuffle=False` build into a genuine
-    reference state -- which is what generate_distance_restraints.py measures
-    its target distances on, and what a recovery check would compare against.
-    Rigid-body members are left alone: their positions follow their rigid
-    body's reference frame, and with `shuffle=False` they are already correct.
-
-    Returns the number of beads moved.
-    """
-    moved = 0
-    for protein in PROTEINS:
-        centers = reference_residue_centers(protein, data_dir)
-        particles = IMP.atom.Selection(
-            built.root_hier, molecule=protein, resolution=1).get_selected_particles()
-        for particle in particles:
-            if IMP.core.RigidMember.get_is_setup(particle):
-                continue
-            if IMP.atom.Fragment.get_is_setup(particle):
-                residues = [int(r) for r in IMP.atom.Fragment(particle).get_residue_indexes()]
-            else:
-                residues = [IMP.atom.Residue(particle).get_index()]
-            missing = [r for r in residues if r not in centers]
-            if missing:
-                raise ValueError(
-                    f"{protein}: reference PDB has no coordinates for residue(s) {missing}")
-            center = IMP.algebra.Vector3D(0, 0, 0)
-            for residue in residues:
-                center += centers[residue]
-            IMP.core.XYZ(particle).set_coordinates(center / len(residues))
-            moved += 1
-    built.model.update()
-    return moved
-
-
 def _build_system_and_restraints(copy_number: int, data_dir: str,
                                  shuffle: bool = True, distance_csv: str = None):
     """Shared construction: build the system, then its two restraint families.
@@ -247,8 +182,10 @@ def _build_system_and_restraints(copy_number: int, data_dir: str,
         wants -- inference has to start away from the answer.  False leaves
         every rigid body on its PDB coordinates, i.e. at the ground truth,
         which is what generate_distance_restraints.py needs in order to read
-        target distances off the reference structure, and what a scoring
-        sanity check ("is the ground truth actually the minimum?") needs.
+        target distances off the reference structure, and what evaluate_
+        recovery.py compares sampled models against.  Note this positions
+        the rigid bodies only: the flexible linker has no structure read in,
+        so PMI leaves its beads on a placeholder and nothing here moves them.
     distance_csv : path to the harmonic distance constraint file; defaults
         to DEFAULT_DISTANCE_CSV inside the resolved data dir.  Pass False to
         build the system with no distance restraints at all.
