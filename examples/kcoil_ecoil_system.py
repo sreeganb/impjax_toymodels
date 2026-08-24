@@ -12,7 +12,11 @@ Mirrors test/test_imp_system.py's JSON + "domains" degrees-of-freedom path:
 each protein (KCOIL, ECOIL) gets `copy_number` copies, each copy has two
 structured domains (residues 1-21 and 32-52, each its own rigid body)
 connected by a flexible unstructured linker (residues 22-31, flexible
-beads), scored by one connectivity restraint per copy.
+beads).  Three restraint families score it: one connectivity restraint per
+copy, one excluded-volume restraint over everything, and the harmonic
+distance restraints listed in data/distance_constraints.csv -- which are
+measured off the ground-truth complex by generate_distance_restraints.py,
+so that sampling from a shuffled start has something to recover it with.
 
 Two small, deliberate differences from the original script (both fixed
 bugs, not behavior changes to the physical system): every copy's
@@ -27,6 +31,7 @@ import os
 from typing import Dict, List, Tuple
 
 import IMP
+import IMP.algebra
 import IMP.atom
 import IMP.core
 import IMP.pmi.dof
@@ -35,10 +40,15 @@ import IMP.pmi.restraints.basic
 import IMP.pmi.topology
 from IMP.pmi.tools import OrderedSet
 
+from impjax_toymodels import distance_restraints
 from impjax_toymodels.system_info import BuiltSystem
 
 EXAMPLES_DIR = os.path.dirname(__file__)
 PROTEINS = ("KCOIL", "ECOIL")
+
+#: Default constraint file, derived from the ground-truth complex by
+#: generate_distance_restraints.py.  Relative to the resolved data dir.
+DEFAULT_DISTANCE_CSV = os.path.join("data", "distance_constraints.csv")
 
 MoleculeKey = Tuple[str, str]
 MoleculesByKey = Dict[MoleculeKey, List]
@@ -133,102 +143,95 @@ def _add_excluded_volume_restraints(root_hier):
                                                                     resolution=10)
     return evr
 
-def _add_distance_restraints(copy_number, root_hier):
-    """One distance restraint per relevant pair of residues, all returned."""
-    restraints = []
-    # choose residues to apply the distance residue between, for example restraint the
-    # lysine residues in the system so that it mimics crosslinking 
-    # For this system specifically we know the residue numbers of the lysine residues,
-    # so create the tuple and apply it!
-    """
-    chain A GLY 26 -- chain B SER 24 : 4.53 A
-    chain A LEU 5  -- chain B GLU 6  : 5.23 A
-    select these particles and apply distance restraints between them.
-    """
-    for i in range(copy_number):
-        m1 = "KCOIL"
-        r1 = 26
-        m2 = "ECOIL"
-        r2 = 24
-        p1 = IMP.atom.Selection(root_hier, state_index=0, molecule=m1, residue_index=r1, resolution=1).get_selected_particles()
-        if not p1:
-            print(f"Warning: No particles found for {m1} residue {r1}")
-        print(p1[0])
-        p2 = IMP.atom.Selection(root_hier, state_index=0, molecule=m2, residue_index=r2, resolution=1).get_selected_particles()
-        if not p2:
-            print(f"Warning: No particles found for {m2} residue {r2}")
-        print(p2[0])
-        print(f"Adding distance restraint between KCOIL {r1} and ECOIL {r2}")
-        
-        tup1 = [r1, r1, m1, i]
-        tup2 = [r2, r2, m2, i]
-        disres1 = IMP.pmi.restraints.basic.DistanceRestraint(root_hier, tup1, tup2, 0.0, 4.53, resolution = 1.0, kappa = 1.0)
-        disres1.add_to_model()
-        restraints.append(disres1)
+def _add_distance_restraints(root_hier, copy_number: int, csv_path: str) -> list:
+    """Attach every harmonic distance restraint listed in a constraint CSV.
 
-        r1 = 5
-        r2 = 6
-        m1 = "KCOIL"
-        m2 = "ECOIL"
-        p1 = IMP.atom.Selection(root_hier, state_index=0, molecule=m1, residue_index=r1, resolution=1).get_selected_particles()
-        if not p1:
-            print(f"Warning: No particles found for {m1} residue {r1}")
-        print(p1[0])
-        p2 = IMP.atom.Selection(root_hier, state_index=0, molecule=m2, residue_index=r2, resolution=1).get_selected_particles()
-        if not p2:
-            print(f"Warning: No particles found for {m2} residue {r2}")
-        print(p2[0])
-        print(f"Adding distance restraint between KCOIL {r1} and ECOIL {r2}")
-        
-        tup1 = [r1, r1, m1, i]
-        tup2 = [r2, r2, m2, i]
-        disres2 = IMP.pmi.restraints.basic.DistanceRestraint(root_hier, tup1, tup2, 0.0, 5.23, resolution = 1.0, kappa = 1.0)
-        disres2.add_to_model()
-        restraints.append(disres2)
-        
-        r1 = 12
-        r2 = 13
-        m1 = "KCOIL"
-        m2 = "ECOIL"
-        p1 = IMP.atom.Selection(root_hier, state_index=0, molecule=m1, residue_index=r1, resolution=1).get_selected_particles()
-        if not p1:
-            print(f"Warning: No particles found for {m1} residue {r1}")
-        print(p1[0])
-        p2 = IMP.atom.Selection(root_hier, state_index=0, molecule=m2, residue_index=r2, resolution=1).get_selected_particles()
-        if not p2:
-            print(f"Warning: No particles found for {m2} residue {r2}")
-        print(p2[0])
-        print(f"Adding distance restraint between KCOIL {r1} and ECOIL {r2}")
-        
-        tup1 = [r1, r1, m1, i]
-        tup2 = [r2, r2, m2, i]
-        disres2 = IMP.pmi.restraints.basic.DistanceRestraint(root_hier, tup1, tup2, 0.0, 5.25, resolution = 1.0, kappa = 1.0)
-        disres2.add_to_model()
-        restraints.append(disres2)
-        
-        r1 = 25
-        r2 = 23
-        m1 = "KCOIL"
-        m2 = "ECOIL"
-        p1 = IMP.atom.Selection(root_hier, state_index=0, molecule=m1, residue_index=r1, resolution=1).get_selected_particles()
-        if not p1:
-            print(f"Warning: No particles found for {m1} residue {r1}")
-        print(p1[0])
-        p2 = IMP.atom.Selection(root_hier, state_index=0, molecule=m2, residue_index=r2, resolution=1).get_selected_particles()
-        if not p2:
-            print(f"Warning: No particles found for {m2} residue {r2}")
-        print(p2[0])
-        print(f"Adding distance restraint between KCOIL {r1} and ECOIL {r2}")
-        
-        tup1 = [r1, r1, m1, i]
-        tup2 = [r2, r2, m2, i]
-        disres2 = IMP.pmi.restraints.basic.DistanceRestraint(root_hier, tup1, tup2, 0.0, 4.80, resolution = 1.0, kappa = 1.0)
-        disres2.add_to_model()
-        restraints.append(disres2)
-    
-    return restraints 
+    The restraints themselves are not hand-written here any more: they are
+    derived from the ground-truth complex by generate_distance_restraints.py
+    and stored in data/distance_constraints.csv, which this function simply
+    reads.  That keeps the *data* (which residue pairs, at what distance, with
+    what force constant) out of the code, so a different restraint set --
+    sparser, noisier, a different cutoff -- is a different CSV, not a different
+    build script.
 
-def _build_system_and_restraints(copy_number: int, data_dir: str):
+    Copy wildcards in the CSV are expanded against `copy_number` here, which is
+    the only place that number is known.
+    """
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(
+            f"distance constraint file not found: {csv_path}\n"
+            "Generate it from the ground-truth structure first:\n"
+            "    python examples/generate_distance_restraints.py"
+        )
+    return distance_restraints.load_and_add(root_hier, csv_path, copy_number)
+
+
+def reference_residue_centers(protein: str, data_dir: str = None) -> dict:
+    """Per-residue centroid of `protein`'s reference (ground-truth) PDB chain.
+
+    A plain, unweighted mean over the residue's atoms, keyed by residue index.
+    This is the ground truth the whole inference is trying to recover: the two
+    per-protein PDBs are the two chains of the reference complex, so they are
+    already in a common frame and no superposition is involved anywhere.
+    """
+    base_dir = data_dir or EXAMPLES_DIR
+    info = _load(os.path.join(base_dir, "data", "json_files", f"{protein}.json"))
+    chain = info["monomer_chain"][0]
+    atoms = {}
+    with open(os.path.join(base_dir, info["files"]["pdb"])) as handle:
+        for line in handle:
+            if line.startswith("ATOM") and line[21] == chain:
+                atoms.setdefault(int(line[22:26]), []).append(
+                    (float(line[30:38]), float(line[38:46]), float(line[46:54])))
+    return {residue: IMP.algebra.Vector3D(
+                *[sum(axis) / len(coords) for axis in zip(*coords)])
+            for residue, coords in atoms.items()}
+
+
+def place_flexible_beads_at_reference(built: BuiltSystem, data_dir: str = None) -> int:
+    """Move every flexible bead onto its reference-structure position.
+
+    Only the *structured* domains are read out of the PDB when the system is
+    built, so PMI has nothing to place the linker beads (residues 22-31) with
+    and stacks them all on a single placeholder coordinate.  The reference
+    complex does have coordinates for those residues, so the built system is
+    at the ground truth for its rigid bodies but not for its linkers.
+
+    This closes that gap, turning a `shuffle=False` build into a genuine
+    reference state -- which is what generate_distance_restraints.py measures
+    its target distances on, and what a recovery check would compare against.
+    Rigid-body members are left alone: their positions follow their rigid
+    body's reference frame, and with `shuffle=False` they are already correct.
+
+    Returns the number of beads moved.
+    """
+    moved = 0
+    for protein in PROTEINS:
+        centers = reference_residue_centers(protein, data_dir)
+        particles = IMP.atom.Selection(
+            built.root_hier, molecule=protein, resolution=1).get_selected_particles()
+        for particle in particles:
+            if IMP.core.RigidMember.get_is_setup(particle):
+                continue
+            if IMP.atom.Fragment.get_is_setup(particle):
+                residues = [int(r) for r in IMP.atom.Fragment(particle).get_residue_indexes()]
+            else:
+                residues = [IMP.atom.Residue(particle).get_index()]
+            missing = [r for r in residues if r not in centers]
+            if missing:
+                raise ValueError(
+                    f"{protein}: reference PDB has no coordinates for residue(s) {missing}")
+            center = IMP.algebra.Vector3D(0, 0, 0)
+            for residue in residues:
+                center += centers[residue]
+            IMP.core.XYZ(particle).set_coordinates(center / len(residues))
+            moved += 1
+    built.model.update()
+    return moved
+
+
+def _build_system_and_restraints(copy_number: int, data_dir: str,
+                                 shuffle: bool = True, distance_csv: str = None):
     """Shared construction: build the system, then its two restraint families.
 
     Factored out so the system can be handed back either as one combined
@@ -236,11 +239,26 @@ def _build_system_and_restraints(copy_number: int, data_dir: str):
     partition (`build_kcoil_ecoil_split`), without building it twice or
     duplicating any of the topology code.
 
+    Parameters
+    ----------
+    copy_number : number of copies of *each* protein to build.
+    data_dir : base directory whose "data" subfolder holds the inputs.
+    shuffle : randomize the starting configuration.  True is what sampling
+        wants -- inference has to start away from the answer.  False leaves
+        every rigid body on its PDB coordinates, i.e. at the ground truth,
+        which is what generate_distance_restraints.py needs in order to read
+        target distances off the reference structure, and what a scoring
+        sanity check ("is the ground truth actually the minimum?") needs.
+    distance_csv : path to the harmonic distance constraint file; defaults
+        to DEFAULT_DISTANCE_CSV inside the resolved data dir.  Pass False to
+        build the system with no distance restraints at all.
+
     Returns
     -------
     built : system_info.BuiltSystem
     connectivity : list of PMI connectivity restraint objects (one per copy)
     excluded_volume : the single PMI excluded-volume restraint object
+    disres : list of PMI harmonic distance restraint objects, one per CSV row
     """
     base_dir = data_dir or EXAMPLES_DIR
     model = IMP.Model()
@@ -261,15 +279,25 @@ def _build_system_and_restraints(copy_number: int, data_dir: str):
 
     connectivity = _add_connectivity_restraints(molecules)
     excluded_volume = _add_excluded_volume_restraints(root_hier)
-    disres = _add_distance_restraints(copy_number, root_hier)
+    if distance_csv is False:
+        # Bootstrap path: generate_distance_restraints.py builds this very
+        # system in order to *write* the constraint file, so it cannot also
+        # require the file to already exist.
+        disres = []
+    else:
+        csv_path = distance_csv or os.path.join(base_dir, DEFAULT_DISTANCE_CSV)
+        disres = _add_distance_restraints(root_hier, copy_number, csv_path)
 
-    # Obviously start from random configurations
-    mol_names = []
-    for k, ms in molecules.items():
-        mol_names += ms
-    IMP.pmi.tools.shuffle_configuration(mol_names,
-                                        max_translation=200,
-                                        avoidcollision_rb=True)
+    # Inference has to start from a random configuration: if we started from
+    # the PDB coordinates the answer would already be in hand.  Skipped only
+    # when the caller explicitly asks for the reference state (see `shuffle`).
+    if shuffle:
+        mol_names = []
+        for k, ms in molecules.items():
+            mol_names += ms
+        IMP.pmi.tools.shuffle_configuration(mol_names,
+                                            max_translation=200,
+                                            avoidcollision_rb=True)
 
     built = BuiltSystem(
         model=model,
@@ -282,10 +310,12 @@ def _build_system_and_restraints(copy_number: int, data_dir: str):
     return built, connectivity, excluded_volume, disres
 
 
-def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
+def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None,
+                             shuffle: bool = True, distance_csv: str = None):
     """Build the two-protein (KCOIL, ECOIL) toy coiled-coil system.
 
-    Every restraint (connectivity + excluded volume) goes into a single
+    Every restraint (connectivity + excluded volume + the harmonic distance
+    restraints read from data/distance_constraints.csv) goes into a single
     scoring function, so the sampler treats the whole thing as one target
     with a flat prior. For the restraint-partitioned arrangement instead,
     see `build_kcoil_ecoil_split`.
@@ -294,9 +324,13 @@ def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
     ----------
     copy_number : number of copies of *each* protein to build.
     data_dir : base directory whose "data" subfolder holds json_files/,
-        pdb/, fasta/ (matching each JSON's own "data/..." relative paths,
-        e.g. "data/fasta/KCOIL.fasta"); defaults to the examples/ directory
-        itself, i.e. this file's own examples/data/.
+        pdb/, fasta/ and distance_constraints.csv (matching each JSON's own
+        "data/..." relative paths, e.g. "data/fasta/KCOIL.fasta"); defaults
+        to the examples/ directory itself, i.e. this file's own examples/data/.
+    shuffle : randomize the starting configuration (True) or leave every
+        rigid body on its ground-truth PDB coordinates (False).
+    distance_csv : override the default constraint file path, or False to
+        build with no distance restraints.
 
     Returns
     -------
@@ -304,7 +338,8 @@ def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
     score_function : IMP.core.RestraintsScoringFunction over all restraints
     output_objects : PMI restraint objects, for IMP's own stat-file machinery
     """
-    built, connectivity, excluded_volume, disres = _build_system_and_restraints(copy_number, data_dir)
+    built, connectivity, excluded_volume, disres = _build_system_and_restraints(
+        copy_number, data_dir, shuffle=shuffle, distance_csv=distance_csv)
 
     output_objects = list(connectivity) + [excluded_volume] + disres
     restraints_set = [r.get_restraint() for r in connectivity] + [excluded_volume.get_restraint()] + [r.get_restraint() for r in disres]
@@ -312,7 +347,8 @@ def build_kcoil_ecoil_system(copy_number: int = 4, data_dir: str = None):
     return built, score_function, output_objects
 
 
-def build_kcoil_ecoil_split(copy_number: int = 4, data_dir: str = None):
+def build_kcoil_ecoil_split(copy_number: int = 4, data_dir: str = None,
+                            shuffle: bool = True, distance_csv: str = None):
     """Build the same system with its restraints partitioned prior/likelihood.
 
     Connectivity goes into its own scoring function to be used as the prior
@@ -321,19 +357,26 @@ def build_kcoil_ecoil_split(copy_number: int = 4, data_dir: str = None):
     posterior would double-count -- which is exactly what this split
     guarantees, and what priors.restraint_prior checks for.
 
-    In a real study the likelihood side is where the experimental restraints
-    (crosslinks, EM, SAXS) would go; excluded volume stands in for them here
-    because this toy system has no data.
+    The distance restraints read from data/distance_constraints.csv are the
+    experimental-data stand-in, so they go on the likelihood side together
+    with excluded volume; connectivity is the structural prior.  (Distance
+    restraints previously went into neither scoring function on this path --
+    they were added to the IMP model but never scored, so the split sampler
+    was inferring against excluded volume alone.)
 
     Returns
     -------
     built : system_info.BuiltSystem
-    likelihood_score_function : excluded volume only -- the tempered term
+    likelihood_score_function : excluded volume + distance restraints -- the
+        tempered term
     prior_score_function : connectivity only -- the untempered structural prior
     output_objects : PMI restraint objects, for IMP's own stat-file machinery
     """
-    built, connectivity, excluded_volume, disres = _build_system_and_restraints(copy_number, data_dir)
+    built, connectivity, excluded_volume, disres = _build_system_and_restraints(
+        copy_number, data_dir, shuffle=shuffle, distance_csv=distance_csv)
 
-    likelihood_sf = IMP.core.RestraintsScoringFunction([excluded_volume.get_restraint()])
+    likelihood_sf = IMP.core.RestraintsScoringFunction(
+        [excluded_volume.get_restraint()]
+        + [r.get_restraint() for r in disres])
     prior_sf = IMP.core.RestraintsScoringFunction([r.get_restraint() for r in connectivity])
     return built, likelihood_sf, prior_sf, list(connectivity) + [excluded_volume] + disres
