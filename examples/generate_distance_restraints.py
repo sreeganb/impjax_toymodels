@@ -172,6 +172,23 @@ def main(argv=None) -> int:
     if not chosen:
         parser.error("no restraints selected -- widen --residue-types or raise --top-n")
 
+    required_keys = {
+        (pair.protein1, pair.copy1) for pair in chosen
+    } | {
+        (pair.protein2, pair.copy2) for pair in chosen
+    }
+    available_keys = set(atoms.keys())
+    missing_keys = sorted(required_keys - available_keys)
+    if missing_keys:
+        provided = sorted(set(chains.values()))
+        parser.error(
+            "selected contacts require protein/copy mappings that are not present in "
+            f"the provided --chains mapping/PDB: missing {missing_keys}. "
+            f"Provided protein/copy mappings: {provided}. "
+            "Check --chains (for example, if copy 1 of ECOIL is needed, include a "
+            "chain mapped as ...=ECOIL:1)."
+        )
+
     if args.wildcard_copies:
         crossing = [p for p in chosen if p.copy1 != p.copy2]
         if crossing:

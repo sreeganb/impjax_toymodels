@@ -139,7 +139,7 @@ def _add_connectivity_restraints(molecules: MoleculesByKey) -> list:
 
 def _add_excluded_volume_restraints(root_hier):
     evr = IMP.pmi.restraints.stereochemistry.ExcludedVolumeSphere(included_objects=root_hier,
-                                                                    resolution=10)
+                                                                    resolution=1)
     return evr
 
 def _add_distance_restraints(root_hier, copy_number: int, csv_path: str) -> list:
