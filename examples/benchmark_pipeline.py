@@ -52,7 +52,7 @@ import evaluate_recovery
 import generate_distance_restraints
 import kcoil_ecoil_system as system_builder
 import run_kcoil_ecoil_sampling as runner
-from impjax_toymodels import dof_layout, distance_restraints, logging_config
+from impjax_toymodels import contact_map, dof_layout, distance_restraints, logging_config
 
 EXAMPLES_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -115,9 +115,21 @@ def prepare_restraints(config: dict, copy_number: int, case_dir: str) -> str:
                   "min_seq_sep": 3, "force_constant": 1.0, "wildcard_copies": True},
                **config["restraints"]}
     output = os.path.join(case_dir, "distance_constraints.csv")
+    contact_map_path = os.path.join(EXAMPLES_DIR, truth["contact_map"])
+
+    # A '*' copy wildcard can only say "copy i to copy i", so it is valid only
+    # when the ground truth describes a single assembly that gets replicated.
+    # A genuine multi-copy structure has real cross-copy contacts, and those
+    # have to be written with explicit copy indexes.
+    copies_in_map = {c for pair in contact_map.read_contact_map(contact_map_path)
+                     for c in (pair.copy1, pair.copy2)}
+    if len(copies_in_map) > 1 and options["wildcard_copies"]:
+        print(f"  contact map spans copies {sorted(copies_in_map)}; writing explicit "
+              "copy indexes rather than the '*' wildcard")
+        options["wildcard_copies"] = False
 
     argv = [
-        "--contact-map", os.path.join(EXAMPLES_DIR, truth["contact_map"]),
+        "--contact-map", contact_map_path,
         "--structure", os.path.join(EXAMPLES_DIR, truth["structure"]),
         "--chains", *chain_args(truth["chains"]),
         "--top-n", str(options["top_n"]),
@@ -157,6 +169,56 @@ def rmf_path_for(sampler: str, out_prefix: str) -> str:
     return f"{out_prefix}_{sampler}.rmf3"
 
 
+def reference_coordinates(config: dict, copy_number: int) -> Dict[int, np.ndarray]:
+    """Ground-truth bead positions for each copy, from *this case's* structure.
+
+    Every case must be scored against its own ground truth. The tetramer's
+    dimers differ from the reference dimer in kcoil_ecoil.pdb by ~11 A RMSD,
+    so measuring a two-copy model against the one-copy reference would report
+    an 11 A floor that has nothing to do with how the sampler did.
+
+    Returns structured-bead coordinates per copy, ordered exactly as
+    evaluate_recovery.bead_coordinates orders them, so the two can be compared
+    row for row. Bead centers are the plain mean over the constituent
+    residues' atoms, which reproduces IMP's own placement exactly.
+    """
+    truth = ground_truth_for(config, copy_number)
+    chains = {chain: (protein, index)
+              for chain, (protein, index) in truth["chains"].items()}
+    atoms = generate_distance_restraints.chain_atoms(
+        os.path.join(EXAMPLES_DIR, truth["structure"]), chains)
+
+    # Bead decomposition is a property of the representation, so one build
+    # supplies it for every copy; only the coordinates differ between copies.
+    built, _, _ = system_builder.build_kcoil_ecoil_system(
+        copy_number=1, distance_csv=False)
+    structured: Dict[str, List[tuple]] = {}
+    for protein in system_builder.PROTEINS:
+        beads = []
+        for particle in IMP.atom.Selection(
+                built.root_hier, molecule=protein, copy_index=0,
+                resolution=1).get_selected_particles():
+            if not IMP.core.RigidMember.get_is_setup(particle):
+                continue  # linker: no reference conformation to score against
+            beads.append(tuple(int(r) for r in
+                               IMP.atom.Fragment(particle).get_residue_indexes()))
+        structured[protein] = beads
+
+    reference = {}
+    for copy_index in range(copy_number):
+        rows = []
+        for protein in system_builder.PROTEINS:
+            key = (protein, copy_index)
+            if key not in atoms:
+                raise ValueError(
+                    f"ground truth for copy_number={copy_number} has no chain mapped to "
+                    f"{protein} copy {copy_index}; check the 'chains' mapping")
+            for residues in structured[protein]:
+                rows.append(generate_distance_restraints.bead_center(atoms[key], residues))
+        reference[copy_index] = np.asarray(rows)
+    return reference
+
+
 def system_size(copy_number: int, distance_csv: str) -> dict:
     """Sampled degrees of freedom and restraint count for one case."""
     built, _, _ = system_builder.build_kcoil_ecoil_system(
@@ -174,7 +236,8 @@ def system_size(copy_number: int, distance_csv: str) -> dict:
 
 
 def analyse_trajectory(rmf_path: str, copy_number: int, distance_csv: str,
-                       window: int, tolerance: float, reference) -> Optional[dict]:
+                       window: int, tolerance: float,
+                       reference: Dict[int, np.ndarray]) -> Optional[dict]:
     """Per-frame RMSD, CPU-IMP score and restraint satisfaction, over a window."""
     if not os.path.exists(rmf_path):
         return None
@@ -198,9 +261,12 @@ def analyse_trajectory(rmf_path: str, copy_number: int, distance_csv: str,
     rmsds, scores, satisfied = [], [], []
     for frame in range(start, n_frames):
         IMP.rmf.load_frame(handle, RMF.FrameID(frame))
+        # Worst copy in the frame: each is scored against its own copy of the
+        # ground truth, since cross-copy restraints fix which copy is which.
         rmsds.append(max(
             evaluate_recovery.superposed_rmsd(
-                evaluate_recovery.bead_coordinates(built.root_hier, index), reference)
+                evaluate_recovery.bead_coordinates(built.root_hier, index),
+                reference[index])
             for index in range(copy_number)))
         scores.append(float(score_function.evaluate(False)))
         # A restraint is satisfied when the two beads are within `tolerance`
@@ -227,7 +293,6 @@ def run_sweep(config: dict, out_root: str) -> List[dict]:
     """Run every (copy number, sampler) case and measure the result."""
     import jax
 
-    reference = evaluate_recovery.reference_coordinates(EXAMPLES_DIR)
     backend = jax.default_backend()
     records = []
 
@@ -235,6 +300,7 @@ def run_sweep(config: dict, out_root: str) -> List[dict]:
         case_dir = os.path.join(out_root, f"n{copy_number}")
         os.makedirs(case_dir, exist_ok=True)
         distance_csv = prepare_restraints(config, copy_number, case_dir)
+        reference = reference_coordinates(config, copy_number)
         size = system_size(copy_number, distance_csv)
         print(f"\n=== copy_number={copy_number}: {size['n_dof']} DOF, "
               f"{size['n_restraints']} restraints ===")

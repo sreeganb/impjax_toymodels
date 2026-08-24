@@ -1,20 +1,59 @@
 {
   "name": "kcoil_ecoil_sweep",
   "output_dir": "out/benchmark",
-  "copy_numbers": [1, 2, 3],
-  "samplers": ["rmh", "smc", "smc_tempered", "smc_adaptive", "imp_rex"],
+  "copy_numbers": [
+    1,
+    2
+  ],
+  "samplers": [
+    "rmh",
+    "smc",
+    "smc_tempered",
+    "smc_adaptive",
+    "imp_rex"
+  ],
   "score_window": 50,
   "satisfaction_tolerance": 2.0,
   "seed": 0,
   "prior": "flat",
-
   "ground_truth": {
     "structure": "data/pdb/kcoil_ecoil.pdb",
     "contact_map": "data/contact_maps/kcoil_ecoil_n1.csv",
-    "chains": {"A": ["KCOIL", 0], "B": ["ECOIL", 0]},
-    "per_copy_number": {}
+    "chains": {
+      "A": [
+        "KCOIL",
+        0
+      ],
+      "B": [
+        "ECOIL",
+        0
+      ]
+    },
+    "per_copy_number": {
+      "2": {
+        "structure": "data/pdb/kcoil_ecoil_tetramer.pdb",
+        "contact_map": "data/contact_maps/kcoil_ecoil_n2.csv",
+        "chains": {
+          "A": [
+            "KCOIL",
+            0
+          ],
+          "D": [
+            "ECOIL",
+            0
+          ],
+          "B": [
+            "KCOIL",
+            1
+          ],
+          "C": [
+            "ECOIL",
+            1
+          ]
+        }
+      }
+    }
   },
-
   "restraints": {
     "top_n": 10,
     "top_n_intra": 2,
@@ -23,14 +62,12 @@
     "force_constant": 1.0,
     "wildcard_copies": true
   },
-
   "proposal": {
     "mode": "all",
     "sigma_rotation": 0.05,
     "sigma_translation": 1.0,
     "sigma_bead": 1.0
   },
-
   "sampler_params": {
     "n_steps": 4000,
     "burnin": 0,
