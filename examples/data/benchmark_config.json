@@ -12,7 +12,7 @@
     "smc_adaptive",
     "imp_rex"
   ],
-  "score_window": 50,
+  "score_window": 100,
   "satisfaction_tolerance": 2.0,
   "seed": 0,
   "prior": "flat",
@@ -55,7 +55,7 @@
     }
   },
   "restraints": {
-    "top_n": 10,
+    "top_n": 20,
     "top_n_intra": 2,
     "residue_types": "KS",
     "min_seq_sep": 3,
@@ -69,15 +69,15 @@
     "sigma_bead": 1.0
   },
   "sampler_params": {
-    "n_steps": 4000,
-    "burnin": 0,
+    "n_steps": 5000,
+    "burnin": 500,
     "thin": 1,
     "n_particles": 256,
     "n_temperature_steps": 100,
-    "n_mcmc_steps": 20,
+    "n_mcmc_steps": 50,
     "schedule": "linear",
     "target_ess": 0.6,
-    "imp_rex_frames": 500,
+    "imp_rex_frames": 5000,
     "imp_rex_mc_steps": 10,
     "imp_rex_max_temp": 2.5
   }

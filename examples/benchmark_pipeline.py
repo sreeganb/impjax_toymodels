@@ -59,10 +59,10 @@ EXAMPLES_DIR = os.path.dirname(os.path.abspath(__file__))
 #: Filled in from the JSON, but every key needs a value before a Namespace can
 #: be handed to run_kcoil_ecoil_sampling's runners.
 SAMPLER_DEFAULTS = {
-    "n_steps": 2000, "burnin": 0, "thin": 1,
-    "n_particles": 100, "n_temperature_steps": 50, "n_mcmc_steps": 10,
+    "n_steps": 5000, "burnin": 1000, "thin": 1,
+    "n_particles": 100, "n_temperature_steps": 100, "n_mcmc_steps": 10,
     "schedule": "linear", "target_ess": 0.5,
-    "imp_rex_frames": 200, "imp_rex_mc_steps": 10, "imp_rex_max_temp": 2.5,
+    "imp_rex_frames": 5000, "imp_rex_mc_steps": 10, "imp_rex_max_temp": 2.5,
 }
 
 PROPOSAL_DEFAULTS = {
