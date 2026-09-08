@@ -198,3 +198,66 @@ RMH, three SMC variants, and IMP's own replica exchange as the baseline. The
 report adds three docking pages (L-RMSD, I-RMSD, fnat) to the standard ones,
 driven by the config's `metrics_module` key; a system without one gets the
 standard report unchanged.
+
+### Seeds are not optional here
+
+The config runs the sweep over `"seeds": [0, 1, 2, 3, 4]`, and each seed is a
+**different starting structure** — `seed_imp` seeds IMP's own RNG, which is
+what `shuffle_configuration` draws from. That matters because two rigid bodies
+with nothing tethering them is a genuinely multimodal search: before seeding
+was fixed, two runs of this exact config measured the same sampler docking to
+1.6 Å and failing at 17.6 Å. A single seed here measures luck as much as
+sampler quality.
+
+Seeding also makes the comparison fair. Every sampler builds its own system
+(sampling mutates the IMP model in place, so they cannot share one), which
+previously meant each got a *different* random start.
+
+## Results
+
+Measured on this machine (JAX on CPU), 5 seeds, wall time equalised at
+~6–8 s per sampler — `imp_rex` is at 6000 frames for that reason; at 2000 it
+finished in 3 s and any reliability claim would have been unfair.
+
+Final-window median RMSD to the crystal structure, per seed:
+
+| sampler | s0 | s1 | s2 | s3 | s4 | docked | wall s | cpu s |
+|---|---:|---:|---:|---:|---:|:---:|---:|---:|
+| `rmh`          |  1.46 |  1.07 | 16.07 |  1.07 |  1.52 | 4/5 | 6.2 |  8.9 |
+| `smc`          | 16.10 |  0.91 |  0.93 |  0.94 |  1.01 | 4/5 | 7.9 | 24.3 |
+| `smc_tempered` | 16.03 |  0.92 |  0.88 |  0.86 |  0.83 | 4/5 | 7.6 | 25.4 |
+| `smc_adaptive` |  1.00 |  1.02 |  1.10 |  1.14 |  1.61 | **5/5** | 8.3 | 26.3 |
+| `imp_rex`      |  1.05 |  9.67 | 17.23 | 17.18 |  1.19 | 2/5 | 7.2 |  7.1 |
+
+Best frame found across all seeds:
+
+| sampler | RMSD | L-RMSD | I-RMSD | fnat | CAPRI |
+|---|---:|---:|---:|---:|:---:|
+| `rmh`          | 0.57 | 1.05 | 0.47 | 0.91 | high |
+| `smc`          | 0.65 | 1.37 | 0.54 | 0.76 | high |
+| `smc_tempered` | 0.66 | 1.42 | 0.53 | 0.77 | high |
+| `smc_adaptive` | 0.67 | 1.29 | 0.56 | 0.84 | high |
+| `imp_rex`      | 0.36 | 1.08 | 0.31 | 1.00 | high |
+
+Read together these say something the aggregate score alone would not:
+
+* **Every sampler can solve this problem.** All five reach CAPRI *high*
+  quality on their best frame, sub-ångström in RMSD. The 20 synthetic
+  crosslinks determine the 6 relative degrees of freedom well.
+* **They differ in reliability, not in ceiling.** Adaptive-tempered SMC
+  docked from all five starts; RMH and the fixed-ladder SMC variants from
+  four; IMP's replica exchange from two, at comparable wall time. Adapting
+  the temperature ladder to hold ESS is doing real work on a multimodal
+  target — which is the case the fixed ladder was never going to cover, since
+  its schedule cannot notice that the population has collapsed.
+* **When replica exchange does find the interface it refines best** (0.36 Å,
+  every native contact recovered) — unsurprising for a well-tuned MC with
+  adaptive movers. Its problem here is search, not refinement.
+* **Wall time hides a large CPU-time difference.** The SMC variants use
+  ~25 s of CPU for ~8 s of wall time; RMH uses 8.9 s and replica exchange
+  7.1 s. The SMC population vectorises, so it is buying reliability with
+  parallel work — which is exactly the trade a GPU should make cheaper, and
+  the number to re-measure on one.
+
+These are single-machine, CPU-backend numbers on one 14-parameter system, not
+a general claim about the samplers.
