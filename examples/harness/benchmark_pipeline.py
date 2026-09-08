@@ -1,11 +1,12 @@
 """Sweep copy numbers and samplers, then report timings, scores and accuracy.
 
 A standalone harness over everything else in examples/: it builds no systems
-and runs no samplers of its own, it drives run_kcoil_ecoil_sampling.py's
+and runs no samplers of its own, it drives run_sampling_comparison.py's
 runners and generate_distance_restraints.py's selection, then measures what
-came out and writes a single multi-page PDF.
+came out and writes a single multi-page PDF.  Which system is swept comes
+from the config's "system" key, so this file names no molecules.
 
-    python benchmark_pipeline.py --config data/benchmark_config.json
+    python harness/benchmark_pipeline.py --config data/benchmark_config.json
 
 What it measures, and why each is separate
 ------------------------------------------
@@ -23,14 +24,26 @@ What it measures, and why each is separate
   those frames. More diagnostic than an aggregate score, which can hide two
   badly violated restraints under a hundred satisfied ones.
 * **Scaling** -- system size (sampled degrees of freedom) against wall time.
+* **Whatever a config's `metrics_module` adds** -- for the docking example,
+  the CAPRI ligand/interface RMSDs and fraction of native contacts.
 
 Every case gets a freshly generated restraint set from the contact map for
 its copy number, so restraint count is a controlled variable rather than an
 accident of what was lying in data/.
+
+Seeds
+-----
+A config's "seeds" list runs the whole sweep once per seed, and each seed is
+a different starting structure (run_sampling_comparison.seed_imp seeds IMP's
+own RNG, which is what `shuffle_configuration` draws from). On a multimodal
+target one seed measures luck as much as sampler quality: the same config was
+measured docking to 1.6 A on one run of this example and failing at 17.6 A on
+the next, before seeding was fixed.
 """
 
 import argparse
 import copy as copy_module
+import importlib
 import json
 import os
 import sys
@@ -57,7 +70,7 @@ from impjax_toymodels import contact_map, dof_layout, distance_restraints, loggi
 HARNESS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 #: Filled in from the JSON, but every key needs a value before a Namespace can
-#: be handed to run_kcoil_ecoil_sampling's runners.
+#: be handed to run_sampling_comparison's runners.
 SAMPLER_DEFAULTS = {
     "n_steps": 5000, "burnin": 1000, "thin": 1,
     "n_particles": 100, "n_temperature_steps": 100, "n_mcmc_steps": 10,
@@ -88,10 +101,24 @@ def load_config(path: str) -> dict:
     # Cached under a private key so it is never written back out to results.json.
     config["_system"] = system_registry.resolve(config["system"])
     config["_base_dir"] = config["_system"].DATA_DIR
+    # Optional per-system extra metrics (e.g. the CAPRI docking scores).  The
+    # module must expose build_evaluator(system) -> (evaluator, reference) and
+    # an evaluator with .score(coords) -> object with .as_row().
+    config["_metrics"] = (
+        importlib.import_module(config["metrics_module"])
+        if config.get("metrics_module") else None)
     config.setdefault("name", "benchmark")
     config.setdefault("output_dir", "out/benchmark")
     config.setdefault("score_window", 50)
+    # Cap the window at the last quarter of a run, so a short trajectory (an
+    # SMC ladder writes one frame per temperature step) is not judged on its
+    # own anneal. See scoring_window.
+    config.setdefault("score_window_fraction", 0.25)
     config.setdefault("seed", 0)
+    # A list of seeds runs the whole sweep once per seed. Each seed is a
+    # different starting structure (see run_sampling_comparison.seed_imp), so
+    # this is what turns a single anecdote into a distribution.
+    config.setdefault("seeds", [config["seed"]])
     config.setdefault("prior", "connectivity+box")
     config.setdefault("satisfaction_tolerance", 2.0)
     config.setdefault("restraints", {})
@@ -157,8 +184,9 @@ def prepare_restraints(config: dict, copy_number: int, case_dir: str) -> str:
     return output
 
 
-def make_args(config: dict, copy_number: int, distance_csv: str, case_dir: str):
-    """Build the Namespace run_kcoil_ecoil_sampling's runners expect."""
+def make_args(config: dict, copy_number: int, distance_csv: str, case_dir: str,
+              seed: int = None):
+    """Build the Namespace the runners expect, for one (copy number, seed) case."""
     values = {
         **SAMPLER_DEFAULTS, **PROPOSAL_DEFAULTS,
         **config["sampler_params"], **config["proposal"],
@@ -167,9 +195,9 @@ def make_args(config: dict, copy_number: int, distance_csv: str, case_dir: str):
         "distance_csv": distance_csv,
         "prior": config["prior"],
         "prior_box_half_width": config.get("prior_box_half_width", 300.0),
-        "seed": config["seed"],
+        "seed": config["seed"] if seed is None else seed,
         "output_dir": case_dir,
-        "run_name": f"n{copy_number}",
+        "run_name": f"n{copy_number}" if seed is None else f"n{copy_number}_s{seed}",
         "debug": False, "debug_every": 1, "quiet": True,
     }
     return argparse.Namespace(**values)
@@ -248,9 +276,46 @@ def system_size(system, copy_number: int, distance_csv: str) -> dict:
     }
 
 
+def build_metric_evaluators(config: dict, reference: Dict[int, np.ndarray]):
+    """One extra-metrics evaluator per copy, or None if none is configured.
+
+    A config's `metrics_module` names a module supplying system-specific
+    accuracy measurements beyond the global RMSD -- the CAPRI docking scores,
+    for this example. It must expose
+    `evaluators_for(system, {copy: reference_coords}) -> {copy: evaluator}`,
+    where an evaluator has `.score(coords)` returning something with
+    `.as_row()`. Whatever keys that row carries become columns in the results.
+    """
+    metrics = config.get("_metrics")
+    if metrics is None:
+        return None
+    return metrics.evaluators_for(config["_system"], reference)
+
+
+def scoring_window(n_frames: int, window: int, fraction: float) -> int:
+    """First frame of the window a trajectory should be judged on.
+
+    `window` alone is not enough. It assumes a trajectory long relative to it,
+    which is true of an MCMC chain (20000 frames) and false of an SMC run,
+    which writes only its best particle per temperature step -- 50 frames for
+    a 50-step ladder. `max(0, n - window)` then starts at frame 0 and averages
+    the whole anneal, lambda = 0 included, so a run that converged perfectly
+    is scored partly on its own random starting population.
+
+    So the window is also capped at the last `fraction` of the run, which is
+    the "never average over the burn-in" rule stated in a way that does not
+    depend on how many frames a sampler happens to emit. At least one frame is
+    always kept.
+    """
+    by_count = n_frames - window
+    by_fraction = n_frames * (1.0 - fraction)
+    return max(0, min(n_frames - 1, int(max(by_count, by_fraction))))
+
+
 def analyse_trajectory(system, rmf_path: str, copy_number: int, distance_csv: str,
                        window: int, tolerance: float,
-                       reference: Dict[int, np.ndarray]) -> Optional[dict]:
+                       reference: Dict[int, np.ndarray],
+                       evaluators=None, window_fraction: float = 0.25) -> Optional[dict]:
     """Per-frame RMSD, CPU-IMP score and restraint satisfaction, over a window."""
     if not os.path.exists(rmf_path):
         return None
@@ -269,9 +334,10 @@ def analyse_trajectory(system, rmf_path: str, copy_number: int, distance_csv: st
     n_frames = handle.get_number_of_frames()
     if not n_frames:
         return None
-    start = max(0, n_frames - window)
+    start = scoring_window(n_frames, window, window_fraction)
 
     rmsds, scores, satisfied = [], [], []
+    extra: Dict[str, list] = {}
     for frame in range(start, n_frames):
         IMP.rmf.load_frame(handle, RMF.FrameID(frame))
         # Worst copy in the frame: each is scored against its own copy of the
@@ -295,11 +361,28 @@ def analyse_trajectory(system, rmf_path: str, copy_number: int, distance_csv: st
             for r, c in zip(restraints, constraints)]
         satisfied.append(float(np.mean([d <= tolerance for d in deviations])))
 
-    return {
+        if evaluators:
+            # Score every copy, keep the worst: with copy-for-copy restraints
+            # the copies are independent assemblies, and the question is
+            # whether *every* one came back, not whether the best one did.
+            per_copy = [
+                evaluators[index].score(
+                    evaluate_recovery.bead_coordinates(
+                        built.root_hier, index, system=system))
+                for index in range(copy_number)]
+            worst = max(per_copy, key=lambda s: s.ligand_rmsd)
+            for key, value in worst.as_row().items():
+                extra.setdefault(key, []).append(value)
+
+    analysis = {
         "n_frames": n_frames, "window_start": start,
         "rmsd": np.asarray(rmsds), "imp_score": np.asarray(scores),
         "satisfied": np.asarray(satisfied),
     }
+    for key, values in extra.items():
+        # "capri" is a string label, so it stays a plain list.
+        analysis[key] = values if key == "capri" else np.asarray(values)
+    return analysis
 
 
 def run_sweep(config: dict, out_root: str) -> List[dict]:
@@ -314,48 +397,58 @@ def run_sweep(config: dict, out_root: str) -> List[dict]:
         os.makedirs(case_dir, exist_ok=True)
         distance_csv = prepare_restraints(config, copy_number, case_dir)
         reference = reference_coordinates(config, copy_number)
+        evaluators = build_metric_evaluators(config, reference)
         size = system_size(config["_system"], copy_number, distance_csv)
         print(f"\n=== copy_number={copy_number}: {size['n_dof']} DOF, "
               f"{size['n_restraints']} restraints ===")
 
-        args = make_args(config, copy_number, distance_csv, case_dir)
-        out_prefix = os.path.join(case_dir, args.run_name)
-        log_path = f"{out_prefix}.log"
-        # imp_rex's runner logs through this; the BlackJAX runners take the path.
-        case_logger = logging_config.configure_logging(log_path=log_path)
+        # Every seed is a different starting structure. On a multimodal
+        # target -- and a docking search with nothing tethering the bodies is
+        # emphatically that -- one seed measures luck as much as sampler
+        # quality, so the sweep reports the spread across several.
+        for seed in config["seeds"]:
+            args = make_args(config, copy_number, distance_csv, case_dir, seed)
+            out_prefix = os.path.join(case_dir, args.run_name)
+            log_path = f"{out_prefix}.log"
+            # imp_rex's runner logs through this; the BlackJAX runners take the path.
+            case_logger = logging_config.configure_logging(log_path=log_path)
+            if len(config["seeds"]) > 1:
+                print(f"  --- seed {seed} ---")
 
-        for sampler in config["samplers"]:
-            print(f"  running {sampler} ...", flush=True)
-            case_args = copy_module.copy(args)
-            started = time.perf_counter()
-            try:
-                elapsed, final_score, note = runner.RUNNERS[sampler](
-                    sampler, case_args, out_prefix, log_path, case_logger)
-                failure = None
-            except Exception as error:  # a failed sampler must not lose the sweep
-                elapsed, final_score, note = None, float("nan"), str(error)
-                failure = f"{type(error).__name__}: {error}"
-                print(f"    FAILED: {failure}")
+            for sampler in config["samplers"]:
+                print(f"  running {sampler} ...", flush=True)
+                case_args = copy_module.copy(args)
+                started = time.perf_counter()
+                try:
+                    elapsed, final_score, note = runner.RUNNERS[sampler](
+                        sampler, case_args, out_prefix, log_path, case_logger)
+                    failure = None
+                except Exception as error:  # a failed sampler must not lose the sweep
+                    elapsed, final_score, note = None, float("nan"), str(error)
+                    failure = f"{type(error).__name__}: {error}"
+                    print(f"    FAILED: {failure}")
 
-            record = {
-                "copy_number": copy_number, "sampler": sampler, "backend": backend,
-                "wall_time": elapsed.wall_time if elapsed else time.perf_counter() - started,
-                "cpu_time": elapsed.cpu_time if elapsed else float("nan"),
-                "sampler_score": final_score, "note": note, "failure": failure,
-                **size,
-            }
-            if failure is None:
-                analysis = analyse_trajectory(
-                    config["_system"],
-                    rmf_path_for(sampler, out_prefix), copy_number, distance_csv,
-                    config["score_window"], config["satisfaction_tolerance"], reference)
-                if analysis:
-                    record.update(analysis)
-                    print(f"    {record['wall_time']:.1f}s | "
-                          f"RMSD {analysis['rmsd'].min():.2f}-{analysis['rmsd'].max():.2f} A | "
-                          f"IMP score {analysis['imp_score'].min():.1f} | "
-                          f"{100*analysis['satisfied'].max():.0f}% restraints satisfied")
-            records.append(record)
+                record = {
+                    "copy_number": copy_number, "sampler": sampler,
+                    "seed": seed, "backend": backend,
+                    "wall_time": elapsed.wall_time if elapsed else time.perf_counter() - started,
+                    "cpu_time": elapsed.cpu_time if elapsed else float("nan"),
+                    "sampler_score": final_score, "note": note, "failure": failure,
+                    **size,
+                }
+                if failure is None:
+                    analysis = analyse_trajectory(
+                        config["_system"],
+                        rmf_path_for(sampler, out_prefix), copy_number, distance_csv,
+                        config["score_window"], config["satisfaction_tolerance"],
+                        reference, evaluators, config["score_window_fraction"])
+                    if analysis:
+                        record.update(analysis)
+                        print(f"    {record['wall_time']:.1f}s | "
+                              f"RMSD {analysis['rmsd'].min():.2f}-{analysis['rmsd'].max():.2f} A | "
+                              f"IMP score {analysis['imp_score'].min():.1f} | "
+                              f"{100*analysis['satisfied'].max():.0f}% restraints satisfied")
+                records.append(record)
     return records
 
 

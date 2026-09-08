@@ -1,10 +1,47 @@
 # examples
 
-Example scripts and notebooks for IMP/JAX/BlackJAX toy-model experiments live
-in this folder. Unlike `src/impjax_toymodels/`, code here is system-specific
-and not held to the package's 200-300 line/file budget -- it exists to show
-one particular system going through the (system-agnostic) wrapper, not to be
-reused as a library.
+Example systems and the shared harness that runs them.
+
+## Layout
+
+```
+examples/
+  harness/                  system-agnostic: names no molecules
+    system_registry.py        --system NAME -> a system module
+    generate_contact_map.py
+    generate_distance_restraints.py
+    evaluate_recovery.py
+    run_sampling_comparison.py
+    benchmark_pipeline.py / benchmark_report.py
+  kcoil_ecoil_system.py     system module: the coiled-coil dimer
+  rigid_body_docking/       system module + data: 1AVX trypsin/inhibitor
+```
+
+Unlike `src/impjax_toymodels/`, code here is not held to the package's
+200-300 line/file budget -- it exists to show particular systems going
+through the (system-agnostic) wrapper.
+
+`harness/` is shared by every system and mentions none of them. A **system
+module** is what tells it what to build; the protocol is documented in
+`harness/system_registry.py` and is six names:
+
+```python
+PROTEINS, DATA_DIR, DEFAULT_DISTANCE_CSV
+build_system(copy_number, data_dir, shuffle, distance_csv)
+build_split (copy_number, data_dir, shuffle, distance_csv)
+domains_for(protein)
+```
+
+Every harness script takes `--system NAME` (default `kcoil_ecoil_system`), and
+every benchmark config takes a `"system"` key. Adding a third system means
+writing one module and one config, not forking the harness.
+
+Two systems ship:
+
+| | |
+|---|---|
+| `kcoil_ecoil_system` | coiled-coil dimer: rigid domains joined by a flexible linker. Mostly a question about the linker. |
+| `rigid_body_docking/docking_system` | 1AVX trypsin/inhibitor: two rigid bodies, no beads, nothing connecting them. A docking search. See its own [README](rigid_body_docking/README.md). |
 
 ## KCOIL/ECOIL sampling
 
@@ -21,14 +58,14 @@ is trying to recover: chain A is exactly `KCOIL.pdb` and chain B is exactly
 "the ground truth" is simply the built system *before* `shuffle_configuration`
 scrambles it.
 
-`generate_distance_restraints.py` measures that structure and writes a
+`harness/generate_distance_restraints.py` measures that structure and writes a
 **sparse, crosslink-like** restraint set to `data/distance_constraints.csv`:
 
 ```bash
-python generate_distance_restraints.py                    # 10 inter + 2 intra per chain
-python generate_distance_restraints.py --top-n 20         # denser
-python generate_distance_restraints.py --residue-types K  # strict lysine-only
-python generate_distance_restraints.py --explicit-copies 4
+python harness/generate_distance_restraints.py                    # 10 inter + 2 intra per chain
+python harness/generate_distance_restraints.py --top-n 20         # denser
+python harness/generate_distance_restraints.py --residue-types K  # strict lysine-only
+python harness/generate_distance_restraints.py --explicit-copies 4
 ```
 
 Sparse is the point, and not only for realism: **every restraint is a separate
@@ -90,13 +127,13 @@ connectivity remains the prior.
 
 ## Benchmark sweep and PDF report
 
-`benchmark_pipeline.py` is a standalone harness over everything above: it
+`harness/benchmark_pipeline.py` is a standalone harness over everything above: it
 sweeps copy numbers and samplers, measures what came out, and writes a single
 multi-page PDF.
 
 ```bash
-python benchmark_pipeline.py --config data/benchmark_config.json
-python benchmark_pipeline.py --config data/benchmark_config.json --skip-run   # re-render only
+python harness/benchmark_pipeline.py --config data/benchmark_config.json
+python harness/benchmark_pipeline.py --config data/benchmark_config.json --skip-run   # re-render only
 ```
 
 Everything is declared in the JSON — copy numbers, samplers, restraint
@@ -111,6 +148,11 @@ structure and contact map describe each copy number:
   "per_copy_number": {}
 }
 ```
+
+A `"seeds": [0, 1, 2, ...]` list runs the whole sweep once per seed, and each
+seed is a *different starting structure* — `seed_imp` seeds IMP's own RNG,
+which is what `shuffle_configuration` draws from. On a multimodal target one
+seed measures luck as much as sampler quality, so prefer several.
 
 `per_copy_number` is where a genuine N-copy structure goes — `{"2": {...}}`
 overrides the default for that case, which is the path a predicted multi-copy
@@ -130,6 +172,7 @@ restraint count is a controlled variable rather than whatever was left in
 | IMP score | the same frames re-scored by **IMP on the CPU** |
 | Satisfaction | fraction of restraints within tolerance of their target distance |
 | Scaling | degrees of freedom against wall and CPU time |
+| Docking | ligand RMSD, interface RMSD and fnat — only when the config names a `metrics_module` (see `rigid_body_docking/`) |
 | All results | every number as a table |
 
 The score pages are **IMP's own score, not the BlackJAX log-posterior.** The
@@ -155,14 +198,14 @@ shape, and the whole sweep is reproduced as a table.
 
 ## Did it recover the ground truth?
 
-`evaluate_recovery.py` answers that directly, by walking an RMF3 trajectory
+`harness/evaluate_recovery.py` answers that directly, by walking an RMF3 trajectory
 and reporting the RMSD to the reference structure after optimal superposition
 (superposed, because every restraint is a function of internal geometry only,
 so the recovered assembly is free to sit anywhere in space):
 
 ```bash
-python evaluate_recovery.py out/kcoil_ecoil_smc_adaptive.rmf3
-python evaluate_recovery.py out/*.rmf3 --copy-number 2
+python harness/evaluate_recovery.py out/kcoil_ecoil_smc_adaptive.rmf3
+python harness/evaluate_recovery.py out/*.rmf3 --copy-number 2
 ```
 
 Only the structured beads are scored: the linker is genuinely flexible and has
@@ -195,6 +238,10 @@ python run_kcoil_ecoil_sampling.py --copy-number 2 --samplers rmh smc imp_rex --
 # (rmh/smc only) -- writes <run-name>_score_comparison.csv
 python run_kcoil_ecoil_sampling.py --samplers rmh --debug --output-dir out/
 ```
+
+`run_kcoil_ecoil_sampling.py` is a thin forwarder kept so these commands keep
+working; the runner itself is `harness/run_sampling_comparison.py`, which takes
+`--system` and serves every system.
 
 See `python run_kcoil_ecoil_sampling.py --help` for all options (sampling
 mode, proposal scales, SMC particle/temperature-step counts, IMP replica-

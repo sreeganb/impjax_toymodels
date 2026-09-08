@@ -69,6 +69,7 @@ Outputs, under --output-dir, named by --run-name (default "kcoil_ecoil"):
 import argparse
 import os
 
+import IMP
 import IMP.pmi.macros
 import IMP.pmi.restraints.basic
 import jax
@@ -97,6 +98,24 @@ def resolve_prior_name(name: str) -> str:
 SMC_VARIANTS = {"smc": "fixed", "smc_tempered": "tempered", "smc_adaptive": "adaptive"}
 
 
+def seed_imp(args) -> None:
+    """Seed IMP's global RNG, which is what randomizes the starting structure.
+
+    --seed only ever reached JAX, but `shuffle_configuration` draws from IMP's
+    own generator, so two runs of one config started from different structures
+    and a sweep was not reproducible. On a multimodal target that is not a
+    detail: the same config was measured docking to 1.6 A on one run and
+    failing at 17.6 A on the next, purely from where it started.
+
+    Seeding here also makes the comparison fair in a way it previously was
+    not. Every sampler builds its own system (sampling mutates the model in
+    place, so they cannot share one), which meant each got a *different*
+    random start -- confounding sampler quality with starting-point luck. Now
+    they all start from the same structure.
+    """
+    IMP.random_number_generator.seed(args.seed)
+
+
 def build_system_and_prior(args):
     """Build a fresh system plus the prior selected by --prior.
 
@@ -107,6 +126,7 @@ def build_system_and_prior(args):
     the untempered prior and only the rest is tempered.
     """
     system = system_registry.resolve(getattr(args, "system", None))
+    seed_imp(args)
     box = priors.bounding_box(half_width=args.prior_box_half_width)
     # None means "the default file"; benchmark_pipeline.py points this at a
     # per-copy-number restraint set it generated for the case being run.
@@ -255,6 +275,7 @@ def _run_imp_replica_exchange(args, out_prefix: str, run_logger):
     not be a like-for-like baseline.
     """
     system = system_registry.resolve(getattr(args, "system", None))
+    seed_imp(args)
     built, score_function, output_objects = system.build_system(
         copy_number=args.copy_number, distance_csv=getattr(args, "distance_csv", None))
     output_dir = f"{out_prefix}_imp_rex"

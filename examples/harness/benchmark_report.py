@@ -52,7 +52,10 @@ INK_SOFT = "#52514e"
 GRID = "#d9d8d4"
 
 #: Arrays that have to survive the JSON round trip for --skip-run.
-ARRAY_FIELDS = ("rmsd", "imp_score", "satisfied")
+#: Per-frame arrays a record may carry. The last three are only present when
+#: a config names a `metrics_module` supplying them (the CAPRI docking scores).
+ARRAY_FIELDS = ("rmsd", "imp_score", "satisfied",
+                "ligand_rmsd", "interface_rmsd", "fnat")
 
 
 def style_of(sampler: str):
@@ -302,6 +305,34 @@ def _summary_page(pdf, config, records):
     plt.close(figure)
 
 
+def _docking_pages(pdf, records) -> None:
+    """The CAPRI-style pages, when the sweep produced them.
+
+    Skipped entirely for a system whose config names no metrics_module, so one
+    report layout serves both examples.
+    """
+    if not any(record.get("ligand_rmsd") is not None for record in records):
+        return
+
+    _window_panels(
+        pdf, records, "ligand_rmsd", "ligand RMSD (A)",
+        "Docking accuracy: CAPRI ligand RMSD",
+        "Receptor superposed, ligand measured -- so the whole error lands on the "
+        "relative placement,\nwhich a global RMSD spreads across both partners. "
+        "Lower is better.")
+    _window_panels(
+        pdf, records, "interface_rmsd", "interface RMSD (A)",
+        "Docking accuracy: CAPRI interface RMSD",
+        "Interface beads only, defined from the reference structure. Insensitive to "
+        "the lever arm\nthat inflates ligand RMSD when a distant part of the ligand "
+        "swings. Lower is better.")
+    _window_panels(
+        pdf, records, "fnat", "fraction of native contacts",
+        "Docking accuracy: fraction of native contacts (fnat)",
+        "Needs no superposition at all -- it only looks at distances between the two "
+        "molecules.\nHigher is better; 1.0 means every native contact was recovered.")
+
+
 def write_report(path: str, config: dict, records: Sequence[dict]) -> str:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with PdfPages(path) as pdf:
@@ -320,6 +351,7 @@ def write_report(path: str, config: dict, records: Sequence[dict]) -> str:
             "Restraint satisfaction",
             f"Within {config.get('satisfaction_tolerance')} A of the target distance. "
             "Higher is better.")
+        _docking_pages(pdf, records)
         _scaling_page(pdf, records)
         _table_page(pdf, config, records)
     return path

@@ -226,13 +226,39 @@ class DockingEvaluator:
                 f"{self.contact_cutoff} A, {len(self.interface)} interface beads")
 
 
-def build_evaluator(system, copy_index: int = 0, data_dir: str = None,
-                    **cutoffs) -> Tuple[DockingEvaluator, np.ndarray]:
-    """Assemble an evaluator from an unshuffled build of `system`.
+def row_slices_for(system, data_dir: str = None) -> Dict[str, slice]:
+    """The bead-row partition for `system`, from one unshuffled build.
 
-    Returns the evaluator and the reference coordinates it was built from, so
-    a caller that wants the raw reference (to compare a second trajectory,
-    say) does not have to build the system twice.
+    A property of the representation, not of any particular configuration, so
+    every copy and every frame shares it.
+    """
+    built, _, _ = system.build_system(
+        copy_number=1, data_dir=data_dir or system.DATA_DIR,
+        shuffle=False, distance_csv=False)
+    return protein_row_slices(built.root_hier, 0, system.PROTEINS)
+
+
+def evaluators_for(system, references: Dict[int, np.ndarray],
+                   data_dir: str = None, **cutoffs) -> Dict[int, DockingEvaluator]:
+    """One evaluator per copy, sharing a single derivation of the bead layout.
+
+    This is the entry point the benchmark harness calls (via a config's
+    `metrics_module`): each copy is scored against its own copy of the ground
+    truth, so each needs its own evaluator, but only the reference
+    coordinates differ between them.
+    """
+    slices = row_slices_for(system, data_dir)
+    return {index: DockingEvaluator(coordinates, slices, system.PROTEINS, **cutoffs)
+            for index, coordinates in references.items()}
+
+
+def build_evaluator(system, data_dir: str = None,
+                    **cutoffs) -> Tuple[DockingEvaluator, np.ndarray]:
+    """An evaluator against `system`'s own unshuffled build, plus that reference.
+
+    The convenience path for scoring a single-copy trajectory directly; the
+    benchmark uses `evaluators_for` instead, since it already has per-copy
+    reference coordinates measured from the ground-truth structure.
     """
     built, _, _ = system.build_system(
         copy_number=1, data_dir=data_dir or system.DATA_DIR,

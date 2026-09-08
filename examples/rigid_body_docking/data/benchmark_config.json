@@ -1,0 +1,65 @@
+{
+  "name": "1avx_docking_sweep",
+  "system": "docking_system",
+  "metrics_module": "docking_metrics",
+  "output_dir": "out/benchmark",
+  "copy_numbers": [
+    1
+  ],
+  "samplers": [
+    "rmh",
+    "smc",
+    "smc_tempered",
+    "smc_adaptive",
+    "imp_rex"
+  ],
+  "score_window": 100,
+  "score_window_fraction": 0.25,
+  "satisfaction_tolerance": 2.0,
+  "seed": 0,
+  "seeds": [0, 1, 2, 3, 4],
+  "prior": "split+box",
+  "prior_box_half_width": 100.0,
+  "ground_truth": {
+    "structure": "data/pdb/1avx_complex.pdb",
+    "contact_map": "data/contact_maps/1avx_n1.csv",
+    "chains": {
+      "A": [
+        "TRYP",
+        0
+      ],
+      "B": [
+        "STI",
+        0
+      ]
+    },
+    "per_copy_number": {}
+  },
+  "restraints": {
+    "top_n": 20,
+    "top_n_intra": 0,
+    "residue_types": "KS",
+    "min_seq_sep": 3,
+    "force_constant": 1.0,
+    "wildcard_copies": true
+  },
+  "proposal": {
+    "mode": "rigid",
+    "sigma_rotation": 0.02,
+    "sigma_translation": 0.25,
+    "sigma_bead": 1.0
+  },
+  "sampler_params": {
+    "n_steps": 20000,
+    "burnin": 0,
+    "thin": 1,
+    "n_particles": 128,
+    "n_temperature_steps": 50,
+    "n_mcmc_steps": 20,
+    "schedule": "linear",
+    "target_ess": 0.6,
+    "imp_rex_frames": 6000,
+    "imp_rex_mc_steps": 10,
+    "imp_rex_max_temp": 2.5
+  }
+}
