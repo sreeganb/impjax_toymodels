@@ -1,0 +1,27 @@
+{
+  "uniprot_id": "TRYP",
+  "protein_name": "TRYP",
+  "description": "porcine pancreatic trypsin",
+  "files": {
+    "pdb": "data/pdb/TRYP.pdb",
+    "fasta": "data/fasta/TRYP.fasta"
+  },
+  "domains": [
+    [
+      1,
+      223
+    ]
+  ],
+  "oligomerization": false,
+  "monomer_chain": [
+    "A"
+  ],
+  "degrees_of_freedom": "domains",
+  "representation": {
+    "structured": 2,
+    "unstructured": 1
+  },
+  "visualization": {
+    "color": "#4f7ff7"
+  }
+}
