@@ -15,7 +15,7 @@
   "score_window": 100,
   "satisfaction_tolerance": 2.0,
   "seed": 0,
-  "prior": "flat",
+  "prior": "connectivity+box",
   "ground_truth": {
     "structure": "data/pdb/kcoil_ecoil.pdb",
     "contact_map": "data/contact_maps/kcoil_ecoil_n1.csv",
@@ -55,7 +55,7 @@
     }
   },
   "restraints": {
-    "top_n": 20,
+    "top_n": 25,
     "top_n_intra": 2,
     "residue_types": "KS",
     "min_seq_sep": 3,

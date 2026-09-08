@@ -317,3 +317,29 @@ def build_kcoil_ecoil_split(copy_number: int = 4, data_dir: str = None,
         + [r.get_restraint() for r in disres])
     prior_sf = IMP.core.RestraintsScoringFunction([r.get_restraint() for r in connectivity])
     return built, likelihood_sf, prior_sf, list(connectivity) + [excluded_volume] + disres
+
+
+# ---------------------------------------------------------------------------
+# System-module protocol (see examples/harness/system_registry.py)
+#
+# The harness addresses every system through these names, so that it never
+# mentions KCOIL/ECOIL itself.  They are thin aliases over the functions
+# above -- the descriptive names stay as the ones this module's own callers
+# and tests use.
+# ---------------------------------------------------------------------------
+
+#: Base directory whose "data" subfolder holds this system's inputs.
+DATA_DIR = EXAMPLES_DIR
+
+build_system = build_kcoil_ecoil_system
+build_split = build_kcoil_ecoil_split
+
+
+def domains_for(protein: str, data_dir: str = None) -> List[Tuple[int, int]]:
+    """Residue ranges that become rigid bodies, read from the protein's JSON.
+
+    The same `domains` list `_build_rigid_bodies_and_flexible_beads` uses, so
+    a contact map's rigid-body labels agree with the build by construction.
+    """
+    info = _load(os.path.join(data_dir or DATA_DIR, "data", "json_files", f"{protein}.json"))
+    return [(int(low), int(high)) for low, high in info["domains"]]

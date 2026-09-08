@@ -1,0 +1,27 @@
+{
+  "uniprot_id": "STI",
+  "protein_name": "STI",
+  "description": "soybean trypsin inhibitor (Kunitz)",
+  "files": {
+    "pdb": "data/pdb/STI.pdb",
+    "fasta": "data/fasta/STI.fasta"
+  },
+  "domains": [
+    [
+      1,
+      172
+    ]
+  ],
+  "oligomerization": false,
+  "monomer_chain": [
+    "B"
+  ],
+  "degrees_of_freedom": "domains",
+  "representation": {
+    "structured": 2,
+    "unstructured": 1
+  },
+  "visualization": {
+    "color": "#f7754f"
+  }
+}

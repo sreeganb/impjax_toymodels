@@ -608,6 +608,180 @@ overhead per step. Whether BlackJAX overtakes IMP's native sampler is
 expected to depend on step count, system size, and GPU availability --
 exactly what this comparison script exists to measure, not to assume.
 
+\section{A second system: rigid-body docking (1AVX)}
+\label{sec:docking}
+
+Everything above was exercised on one system, the KCOIL/ECOIL coiled-coil
+dimer, whose sampling question is mostly about a flexible linker. A second
+system was added to test the opposite regime: \textbf{1AVX}, porcine
+pancreatic trypsin bound to soybean trypsin inhibitor. One rigid body per
+chain, \emph{no flexible beads}, and nothing connecting the two bodies --
+$\theta$ reduces to two quaternion/translation pairs, 14 sampled parameters
+and 12 degrees of freedom, of which only the 6 relative ones change the
+score.
+
+\subsection{Harness generalization}
+
+Adding it forced a structural correction. Although \texttt{src/} was already
+held to a system-agnostic rule, every analysis script in \texttt{examples/}
+hard-coded \texttt{import kcoil\_ecoil\_system as system\_builder}, so the
+pipeline could only ever demonstrate one system. Those scripts moved to
+\texttt{examples/harness/} and now resolve their system through
+\texttt{system\_registry}, which imports a module by name and checks it
+against a documented six-name protocol (\texttt{PROTEINS},
+\texttt{DATA\_DIR}, \texttt{DEFAULT\_DISTANCE\_CSV}, \texttt{build\_system},
+\texttt{build\_split}, \texttt{domains\_for}). A third system is one module
+plus one JSON config.
+
+The \texttt{-{}-prior} option was renamed accordingly. Its
+\texttt{connectivity} setting was a KCOIL-specific name for ``use the
+system's own prior scoring function''; \emph{which} restraints belong there
+is a per-system decision, so the generic name is \texttt{split}.
+
+\subsection{The zero-flexible-bead path}
+
+Every bridge module carries a bead branch, and this system runs all of them
+at $M = 0$: empty index arrays, $(0,3)$ coordinate blocks, empty
+\texttt{.at[].set()} updates, an empty bead term in the box prior. An audit
+plus twelve new tests found nothing to fix -- \texttt{dof\_layout},
+\texttt{state\_sync}, \texttt{proposals}, \texttt{priors} and
+\texttt{smc\_particles} already handle it correctly. The tests exist to hold
+that path open, since a slip there is invisible to every fixture that has
+beads.
+
+\subsection{Structure preparation is not optional}
+
+The deposited entry cannot be handed to PMI. Trypsin is numbered by alignment
+to chymotrypsinogen, so three residues carry insertion codes (184A, 188A,
+221A); IMP's PDB reader keeps the residue index and drops the code, returning
+\textbf{224 residues with three duplicate indexes}. PMI's
+\texttt{add\_structure} keys on that index, so the duplicates collide and the
+built system is wrong \emph{with no error raised anywhere}.
+
+The same scheme puts six apparent gaps in chain A. None are missing residues:
+every C--N bond across them measures under $1.45$\,\AA. They are deletions
+relative to chymotrypsinogen. \texttt{prepare\_1avx.py} therefore detects
+breaks from the peptide bond rather than the numbering, which is what keeps
+those six from being read as gaps; chain B's 639--643 (C--N $= 11.41$\,\AA)
+is the only genuine break in the complex.
+
+\subsection{Restraint partition}
+
+The tempered likelihood is the 20 synthetic interface crosslinks; the
+untempered prior is excluded volume plus a bounding box. This inverts the
+KCOIL/ECOIL arrangement deliberately. Excluded volume is structural prior
+knowledge, not an observation, and its variance across draws from a box prior
+is nearly zero (scattered bodies never clash), which is precisely why
+tempering it there was close to a no-op. The interface term runs from $0$ at
+the crystal pose to $65661$ after a shuffle.
+
+\subsection{A constant offset in the JAX excluded-volume score}
+\label{sec:ev-offset}
+
+Section~\ref{sec:limitations} records a ${\sim}0.0035\%$ JAX/CPU mismatch for
+excluded volume on KCOIL/ECOIL. On this system the same cause produces a much
+larger and now fully explained discrepancy. At the crystal pose the JAX export
+returns $466.1924$ where IMP's CPU score is $10.5408$. Decomposing the
+all-pairs soft-sphere sum:
+%
+\begin{center}
+\begin{tabular}{@{}r l@{}}
+\toprule
+$466.1924$ & all-pairs total -- what \texttt{score\_func} returns \\
+$455.6515$ & intra-body: 374 overlapping pairs, both ends in one rigid body \\
+$10.5408$  & inter-body: 7 pairs -- equals IMP's CPU score exactly \\
+\bottomrule
+\end{tabular}
+\end{center}
+%
+IMP has no JAX path for close-pair containers, so it cannot apply the
+rigid-body pair filter the CPU path uses, and consecutive resolution-2 beads
+overlap by construction (radius $2.9$--$4.2$\,\AA, neighbouring centres
+${\sim}5$\,\AA{} apart).
+
+The intra-body contribution is an \emph{exact additive constant} in the
+sampled posterior: those pairs are rigid-body members, so their mutual
+distances cannot change. Measured at $455.6515 \pm 2\times10^{-4}$ (float32
+rounding in the quaternion rotation) across rigid moves that swing the
+inter-body term from $0$ to $56.6$. A constant in the log-density cancels in
+every Metropolis acceptance ratio and -- since excluded volume sits in the
+untempered prior here -- in SMC's incremental weights. Sampling is therefore
+unaffected; only the absolute number differs, which is why the benchmark
+re-scores frames with IMP on the CPU rather than quoting the log-posterior.
+
+\subsection{Docking-specific accuracy metrics}
+
+A global superposed RMSD spreads a docking error across both partners:
+translating the ligand $5$\,\AA{} gives a global RMSD of $1.50$ but a ligand
+RMSD of $5.00$. \texttt{docking\_metrics.py} therefore adds the CAPRI
+measurements -- ligand RMSD (superpose receptor, measure ligand), interface
+RMSD, and \emph{fnat} (fraction of native contacts, needing no superposition
+at all) -- with cutoffs derived from the bead radii rather than copied from
+the all-atom literature ($12$\,\AA{} between bead centres for CAPRI's
+$5$\,\AA{} heavy-atom contact). The global RMSD is cross-checked against
+\texttt{IMP.pmi.analysis.Precision}, agreeing to $1.7\times10^{-6}$\,\AA.
+
+\subsection{Two flaws the benchmark exposed}
+
+Running the sweep surfaced two defects in the harness, both since fixed and
+both worth recording because they would silently distort any comparison.
+
+\emph{The scoring window averaged over the anneal.} Taking the last $W$
+frames assumes a trajectory long relative to $W$. That holds for a 20000-step
+MCMC chain and fails for SMC, which writes only its best particle per
+temperature step -- 48 frames for a 47-step ladder. The window then began at
+frame 0 and scored a run partly on its own $\lambda = 0$ population:
+\texttt{smc\_adaptive} went from $21.1$ to $0.9$\,\AA{} across its anneal and
+was reported as a median of $6.73$. The window is now additionally capped at
+the last quarter of a run.
+
+\emph{Sweeps were neither reproducible nor fair.} The seed reached only JAX,
+but the starting structure comes from \texttt{shuffle\_configuration}, which
+draws from IMP's own generator. Two runs of one config measured the same
+sampler docking to $1.6$\,\AA{} and failing at $17.6$\,\AA. Worse, each
+sampler builds its own system (sampling mutates the model in place), so each
+received a \emph{different} random start, confounding sampler quality with
+starting-point luck. IMP's generator is now seeded too, and a config takes a
+list of seeds so the result is a distribution rather than an anecdote.
+
+\subsection{Measured comparison}
+
+Five seeds, wall time equalised at ${\sim}6$--$8$\,s per sampler, JAX on the
+CPU backend. ``Docked'' counts seeds whose final-window median RMSD is under
+$5$\,\AA.
+%
+\begin{center}
+\small
+\begin{tabular}{@{}l r r r r r c r r@{}}
+\toprule
+Sampler & s0 & s1 & s2 & s3 & s4 & docked & wall (s) & cpu (s) \\
+\midrule
+\texttt{rmh}          &  1.46 &  1.07 & 16.07 &  1.07 &  1.52 & 4/5 & 6.2 &  8.9 \\
+\texttt{smc}          & 16.10 &  0.91 &  0.93 &  0.94 &  1.01 & 4/5 & 7.9 & 24.3 \\
+\texttt{smc\_tempered}& 16.03 &  0.92 &  0.88 &  0.86 &  0.83 & 4/5 & 7.6 & 25.4 \\
+\texttt{smc\_adaptive}&  1.00 &  1.02 &  1.10 &  1.14 &  1.61 & \textbf{5/5} & 8.3 & 26.3 \\
+\texttt{imp\_rex}     &  1.05 &  9.67 & 17.23 & 17.18 &  1.19 & 2/5 & 7.2 &  7.1 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+All five reach CAPRI \emph{high} quality on their best frame (sub-\AA ngstrom
+RMSD), so the 20 crosslinks determine the 6 relative degrees of freedom well.
+They differ in \emph{reliability}, not in ceiling: adaptive-tempered SMC
+docked from every start, the fixed-ladder variants and RMH from four, IMP's
+replica exchange from two at comparable wall time. Adapting the ladder to
+hold ESS is doing real work on a multimodal target -- the case a fixed
+schedule cannot cover, since it has no way to notice a collapsed population.
+When replica exchange does find the interface it refines best ($0.36$\,\AA,
+every native contact recovered): its difficulty here is search, not
+refinement. Note also that the SMC variants spend ${\sim}25$\,s of CPU for
+${\sim}8$\,s of wall time, buying reliability with parallel work over the
+population -- the trade a GPU should make cheaper, and the number worth
+re-measuring on one.
+
+These are single-machine CPU-backend numbers on one 14-parameter system, not
+a general claim about the samplers.
+
 \section{Module layout}
 \label{sec:modules}
 
