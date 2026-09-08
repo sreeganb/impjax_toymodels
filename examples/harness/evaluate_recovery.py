@@ -75,17 +75,38 @@ def bead_coordinates(root_hier, copy_index: int, system=None) -> np.ndarray:
     return np.asarray(coordinates)
 
 
-def superposed_rmsd(mobile: np.ndarray, target: np.ndarray) -> float:
-    """RMSD after the optimal rigid superposition (Kabsch, reflection-safe)."""
-    mobile_centered = mobile - mobile.mean(axis=0)
-    target_centered = target - target.mean(axis=0)
-    u, _, vt = np.linalg.svd(mobile_centered.T @ target_centered)
+def kabsch_transform(mobile: np.ndarray, target: np.ndarray):
+    """The optimal rigid superposition of `mobile` onto `target`.
+
+    Returned as (rotation, mobile_center, target_center) rather than applied,
+    so a transform fitted on one subset of atoms can be applied to another --
+    which is exactly what a CAPRI ligand RMSD needs: superpose on the
+    receptor, then measure the ligand.  `apply_transform` consumes it.
+    """
+    mobile_center = mobile.mean(axis=0)
+    target_center = target.mean(axis=0)
+    u, _, vt = np.linalg.svd((mobile - mobile_center).T @ (target - target_center))
     # Force a proper rotation: an unchecked SVD can return a reflection, which
     # would report a mirror image of the structure as a perfect match.
     parity = np.sign(np.linalg.det(vt.T @ u.T))
     rotation = vt.T @ np.diag([1.0, 1.0, parity]) @ u.T
-    residual = target_centered - (rotation @ mobile_centered.T).T
-    return float(np.sqrt((residual ** 2).sum(axis=1).mean()))
+    return rotation, mobile_center, target_center
+
+
+def apply_transform(points: np.ndarray, transform) -> np.ndarray:
+    """Move `points` by a transform from `kabsch_transform`."""
+    rotation, mobile_center, target_center = transform
+    return (rotation @ (points - mobile_center).T).T + target_center
+
+
+def rmsd(first: np.ndarray, second: np.ndarray) -> float:
+    """Plain RMSD between two equal-length, already-positioned point sets."""
+    return float(np.sqrt(((first - second) ** 2).sum(axis=1).mean()))
+
+
+def superposed_rmsd(mobile: np.ndarray, target: np.ndarray) -> float:
+    """RMSD after the optimal rigid superposition (Kabsch, reflection-safe)."""
+    return rmsd(apply_transform(mobile, kabsch_transform(mobile, target)), target)
 
 
 def reference_coordinates(data_dir: str = None, system=None) -> np.ndarray:
