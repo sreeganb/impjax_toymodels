@@ -45,7 +45,7 @@ import IMP.core
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import kcoil_ecoil_system as system_builder
+import system_registry
 from generate_contact_map import parse_chain_spec
 from impjax_toymodels.contact_map import read_contact_map, select
 from impjax_toymodels.distance_restraints import (
@@ -139,12 +139,16 @@ def main(argv=None) -> int:
                              "indexes, so one restraint file replicates to any "
                              "--copy-number; only valid when no selected pair crosses "
                              "copies")
-    parser.add_argument("--data-dir", default=EXAMPLES_DIR)
+    system_registry.add_argument(parser)
+    parser.add_argument("--data-dir", default=None,
+                        help="base directory holding data/ (default: the system's own)")
     parser.add_argument("--output", default=None,
                         help="output CSV (default: <data-dir>/data/distance_constraints.csv)")
     args = parser.parse_args(argv)
 
-    output = args.output or os.path.join(args.data_dir, system_builder.DEFAULT_DISTANCE_CSV)
+    system = system_registry.resolve(args.system)
+    data_dir = args.data_dir or system.DATA_DIR
+    output = args.output or os.path.join(data_dir, system.DEFAULT_DISTANCE_CSV)
     residue_types = None if args.residue_types.upper() == "ALL" else set(
         args.residue_types.upper())
 
@@ -155,10 +159,10 @@ def main(argv=None) -> int:
 
     # Built only for its bead decomposition -- no coordinates are read from it,
     # so its configuration is irrelevant.
-    built, _, _ = system_builder.build_kcoil_ecoil_system(
-        copy_number=1, data_dir=args.data_dir, distance_csv=False)
+    built, _, _ = system.build_system(
+        copy_number=1, data_dir=data_dir, distance_csv=False)
     beads = {protein: residue_to_bead(built.root_hier, protein)
-             for protein in system_builder.PROTEINS}
+             for protein in system.PROTEINS}
 
     def bead_key(pair):
         """Identity of the bead pair a contact would restrain."""

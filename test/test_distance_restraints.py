@@ -21,8 +21,12 @@ import IMP.pmi.restraints.stereochemistry
 import numpy as np
 
 EXAMPLES_DIR = os.path.join(os.path.dirname(__file__), "..", "examples")
-if EXAMPLES_DIR not in sys.path:
-    sys.path.insert(0, EXAMPLES_DIR)
+# The system-agnostic analysis scripts live in examples/harness/; the
+# KCOIL/ECOIL system module itself stays in examples/.
+HARNESS_DIR = os.path.join(EXAMPLES_DIR, "harness")
+for _directory in (EXAMPLES_DIR, HARNESS_DIR):
+    if _directory not in sys.path:
+        sys.path.insert(0, _directory)
 
 CONSTRAINT_FILE = os.path.join(EXAMPLES_DIR, "data", "distance_constraints.csv")
 #: Residue range represented by flexible beads, i.e. with no reference position.

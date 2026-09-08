@@ -50,11 +50,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import evaluate_recovery
 import generate_distance_restraints
-import kcoil_ecoil_system as system_builder
-import run_kcoil_ecoil_sampling as runner
+import run_sampling_comparison as runner
+import system_registry
 from impjax_toymodels import contact_map, dof_layout, distance_restraints, logging_config
 
-EXAMPLES_DIR = os.path.dirname(os.path.abspath(__file__))
+HARNESS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 #: Filled in from the JSON, but every key needs a value before a Namespace can
 #: be handed to run_kcoil_ecoil_sampling's runners.
@@ -72,16 +72,27 @@ PROPOSAL_DEFAULTS = {
 
 
 def load_config(path: str) -> dict:
+    """Read a sweep config and attach the system module it names.
+
+    Every relative path in the config -- ground-truth structures, contact
+    maps, the output directory -- resolves against that system's own base
+    directory, so a config lives next to the data it points at rather than
+    being written relative to examples/.
+    """
     with open(path) as handle:
         config = json.load(handle)
     for required in ("copy_numbers", "samplers", "ground_truth"):
         if required not in config:
             raise ValueError(f"{path}: missing required key {required!r}")
+    config.setdefault("system", system_registry.DEFAULT_SYSTEM)
+    # Cached under a private key so it is never written back out to results.json.
+    config["_system"] = system_registry.resolve(config["system"])
+    config["_base_dir"] = config["_system"].DATA_DIR
     config.setdefault("name", "benchmark")
     config.setdefault("output_dir", "out/benchmark")
     config.setdefault("score_window", 50)
     config.setdefault("seed", 0)
-    config.setdefault("prior", "flat")
+    config.setdefault("prior", "connectivity+box")
     config.setdefault("satisfaction_tolerance", 2.0)
     config.setdefault("restraints", {})
     config.setdefault("proposal", {})
@@ -115,7 +126,7 @@ def prepare_restraints(config: dict, copy_number: int, case_dir: str) -> str:
                   "min_seq_sep": 3, "force_constant": 1.0, "wildcard_copies": True},
                **config["restraints"]}
     output = os.path.join(case_dir, "distance_constraints.csv")
-    contact_map_path = os.path.join(EXAMPLES_DIR, truth["contact_map"])
+    contact_map_path = os.path.join(config["_base_dir"], truth["contact_map"])
 
     # A '*' copy wildcard can only say "copy i to copy i", so it is valid only
     # when the ground truth describes a single assembly that gets replicated.
@@ -130,7 +141,8 @@ def prepare_restraints(config: dict, copy_number: int, case_dir: str) -> str:
 
     argv = [
         "--contact-map", contact_map_path,
-        "--structure", os.path.join(EXAMPLES_DIR, truth["structure"]),
+        "--structure", os.path.join(config["_base_dir"], truth["structure"]),
+        "--system", config["system"],
         "--chains", *chain_args(truth["chains"]),
         "--top-n", str(options["top_n"]),
         "--top-n-intra", str(options["top_n_intra"]),
@@ -150,6 +162,7 @@ def make_args(config: dict, copy_number: int, distance_csv: str, case_dir: str):
     values = {
         **SAMPLER_DEFAULTS, **PROPOSAL_DEFAULTS,
         **config["sampler_params"], **config["proposal"],
+        "system": config["system"],
         "copy_number": copy_number,
         "distance_csv": distance_csv,
         "prior": config["prior"],
@@ -186,14 +199,14 @@ def reference_coordinates(config: dict, copy_number: int) -> Dict[int, np.ndarra
     chains = {chain: (protein, index)
               for chain, (protein, index) in truth["chains"].items()}
     atoms = generate_distance_restraints.chain_atoms(
-        os.path.join(EXAMPLES_DIR, truth["structure"]), chains)
+        os.path.join(config["_base_dir"], truth["structure"]), chains)
 
     # Bead decomposition is a property of the representation, so one build
     # supplies it for every copy; only the coordinates differ between copies.
-    built, _, _ = system_builder.build_kcoil_ecoil_system(
-        copy_number=1, distance_csv=False)
+    system = config["_system"]
+    built, _, _ = system.build_system(copy_number=1, distance_csv=False)
     structured: Dict[str, List[tuple]] = {}
-    for protein in system_builder.PROTEINS:
+    for protein in system.PROTEINS:
         beads = []
         for particle in IMP.atom.Selection(
                 built.root_hier, molecule=protein, copy_index=0,
@@ -207,7 +220,7 @@ def reference_coordinates(config: dict, copy_number: int) -> Dict[int, np.ndarra
     reference = {}
     for copy_index in range(copy_number):
         rows = []
-        for protein in system_builder.PROTEINS:
+        for protein in system.PROTEINS:
             key = (protein, copy_index)
             if key not in atoms:
                 raise ValueError(
@@ -219,9 +232,9 @@ def reference_coordinates(config: dict, copy_number: int) -> Dict[int, np.ndarra
     return reference
 
 
-def system_size(copy_number: int, distance_csv: str) -> dict:
+def system_size(system, copy_number: int, distance_csv: str) -> dict:
     """Sampled degrees of freedom and restraint count for one case."""
-    built, _, _ = system_builder.build_kcoil_ecoil_system(
+    built, _, _ = system.build_system(
         copy_number=copy_number, distance_csv=distance_csv)
     layout = dof_layout.build(built)
     constraints = distance_restraints.expand_copies(
@@ -235,14 +248,14 @@ def system_size(copy_number: int, distance_csv: str) -> dict:
     }
 
 
-def analyse_trajectory(rmf_path: str, copy_number: int, distance_csv: str,
+def analyse_trajectory(system, rmf_path: str, copy_number: int, distance_csv: str,
                        window: int, tolerance: float,
                        reference: Dict[int, np.ndarray]) -> Optional[dict]:
     """Per-frame RMSD, CPU-IMP score and restraint satisfaction, over a window."""
     if not os.path.exists(rmf_path):
         return None
 
-    built, score_function, output_objects = system_builder.build_kcoil_ecoil_system(
+    built, score_function, output_objects = system.build_system(
         copy_number=copy_number, distance_csv=distance_csv)
     restraints = [r for r in output_objects
                   if isinstance(r, IMP.pmi.restraints.basic.DistanceRestraint)]
@@ -265,7 +278,7 @@ def analyse_trajectory(rmf_path: str, copy_number: int, distance_csv: str,
         # ground truth, since cross-copy restraints fix which copy is which.
         rmsds.append(max(
             evaluate_recovery.superposed_rmsd(
-                evaluate_recovery.bead_coordinates(built.root_hier, index),
+                evaluate_recovery.bead_coordinates(built.root_hier, index, system=system),
                 reference[index])
             for index in range(copy_number)))
         scores.append(float(score_function.evaluate(False)))
@@ -301,7 +314,7 @@ def run_sweep(config: dict, out_root: str) -> List[dict]:
         os.makedirs(case_dir, exist_ok=True)
         distance_csv = prepare_restraints(config, copy_number, case_dir)
         reference = reference_coordinates(config, copy_number)
-        size = system_size(copy_number, distance_csv)
+        size = system_size(config["_system"], copy_number, distance_csv)
         print(f"\n=== copy_number={copy_number}: {size['n_dof']} DOF, "
               f"{size['n_restraints']} restraints ===")
 
@@ -333,6 +346,7 @@ def run_sweep(config: dict, out_root: str) -> List[dict]:
             }
             if failure is None:
                 analysis = analyse_trajectory(
+                    config["_system"],
                     rmf_path_for(sampler, out_prefix), copy_number, distance_csv,
                     config["score_window"], config["satisfaction_tolerance"], reference)
                 if analysis:
@@ -355,7 +369,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
-    out_root = args.output_dir or os.path.join(EXAMPLES_DIR, config["output_dir"])
+    out_root = args.output_dir or os.path.join(config["_base_dir"], config["output_dir"])
     os.makedirs(out_root, exist_ok=True)
     results_path = os.path.join(out_root, "results.json")
 

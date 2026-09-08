@@ -39,15 +39,13 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import kcoil_ecoil_system as system_builder
+import system_registry
 from impjax_toymodels.contact_map import (
     FLEXIBLE,
     ContactPair,
     classify,
     write_contact_map,
 )
-
-EXAMPLES_DIR = os.path.dirname(os.path.abspath(__file__))
 
 #: Wider than any crosslinker span, so nothing a restraint could ever use is
 #: lost, while the file stays bounded for large assemblies.
@@ -105,16 +103,15 @@ def read_residues(pdb_path: str, chains: Dict[str, Tuple[str, int]]) -> List[dic
     return residues
 
 
-def body_labels(protein: str, copy_index: int, data_dir: str) -> Dict[int, str]:
+def body_labels(system, protein: str, copy_index: int, data_dir: str) -> Dict[int, str]:
     """Map each residue to its rigid-body label, or FLEXIBLE if it has none.
 
-    Read from the protein's JSON `domains`, the same list the build uses to
-    decide which residues become rigid bodies.
+    Read from the system module's `domains_for`, the same ranges the build uses
+    to decide which residues become rigid bodies, so a map's labels agree with
+    the representation by construction rather than by convention.
     """
-    info = system_builder._load(
-        os.path.join(data_dir, "data", "json_files", f"{protein}.json"))
     labels: Dict[int, str] = {}
-    for low, high in info["domains"]:
+    for low, high in system.domains_for(protein, data_dir):
         for residue in range(low, high + 1):
             labels[residue] = f"{protein}_{copy_index}_{low}-{high}"
     return labels
@@ -158,10 +155,14 @@ def main(argv=None) -> int:
     parser.add_argument("--cutoff", type=float, default=DEFAULT_CUTOFF,
                         help="keep residue pairs closer than this, in A "
                              "(default: %(default)s -- wider than any crosslinker span)")
-    parser.add_argument("--data-dir", default=EXAMPLES_DIR,
-                        help="base directory holding data/ (default: examples/)")
+    system_registry.add_argument(parser)
+    parser.add_argument("--data-dir", default=None,
+                        help="base directory holding data/ (default: the system's own)")
     parser.add_argument("--output", required=True, help="contact-map CSV to write")
     args = parser.parse_args(argv)
+
+    system = system_registry.resolve(args.system)
+    data_dir = args.data_dir or system.DATA_DIR
 
     chains = {}
     for spec in args.chains:
@@ -173,7 +174,7 @@ def main(argv=None) -> int:
         parser.error(f"no mapped residues found in {args.structure}; check --chains")
 
     present = sorted({(r["protein"], r["copy"]) for r in residues})
-    labels = {key: body_labels(key[0], key[1], args.data_dir) for key in present}
+    labels = {key: body_labels(system, key[0], key[1], data_dir) for key in present}
     print(f"{len(residues)} residues across {len(present)} chain(s): "
           + ", ".join(f"{p} copy {c}" for p, c in present))
 

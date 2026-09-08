@@ -268,6 +268,7 @@ def _summary_page(pdf, config, records):
     backends = sorted({r.get("backend", "?") for r in records})
     failures = [r for r in records if r.get("failure")]
     lines = [
+        f"system            {config.get('system', '?')}",
         f"copy numbers      {config['copy_numbers']}",
         f"samplers          {', '.join(config['samplers'])}",
         f"JAX backend       {', '.join(backends)}",

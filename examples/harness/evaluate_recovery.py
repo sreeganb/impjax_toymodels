@@ -46,23 +46,26 @@ import RMF
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import kcoil_ecoil_system as system_builder
+import system_registry
 
-EXAMPLES_DIR = os.path.dirname(os.path.abspath(__file__))
+EXAMPLES_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def bead_coordinates(root_hier, copy_index: int) -> np.ndarray:
+def bead_coordinates(root_hier, copy_index: int, system=None) -> np.ndarray:
     """One copy's structured beads, in a fixed, reproducible order.
 
     Molecule-major then representation order, which is what
     `IMP.atom.Selection` yields for a given (molecule, copy) pair.  Both the
     reference and the trajectory system are read with this same function, and
     both are built by the same code, so row i means the same bead in both.
+    Molecule order comes from the system module's `PROTEINS`, which is fixed
+    for the run -- that is what makes the two orderings agree.
 
     Flexible beads are skipped -- see the module docstring.
     """
+    system = system or system_registry.resolve()
     coordinates = []
-    for protein in system_builder.PROTEINS:
+    for protein in system.PROTEINS:
         particles = IMP.atom.Selection(
             root_hier, molecule=protein, copy_index=copy_index,
             resolution=1).get_selected_particles()
@@ -85,26 +88,28 @@ def superposed_rmsd(mobile: np.ndarray, target: np.ndarray) -> float:
     return float(np.sqrt((residual ** 2).sum(axis=1).mean()))
 
 
-def reference_coordinates(data_dir: str) -> np.ndarray:
-    """The ground truth dimer: simply an unshuffled build.
+def reference_coordinates(data_dir: str = None, system=None) -> np.ndarray:
+    """The ground truth assembly: simply an unshuffled build.
 
     `shuffle=False` leaves every rigid body on its PDB coordinates, and since
     only structured beads are scored that is the whole reference -- nothing
     needs moving.  Built at copy_number=1 because there is only ever one
-    reference dimer; every copy in a multi-copy model is compared against it.
+    reference assembly; every copy in a multi-copy model is compared against it.
     """
-    built, _, _ = system_builder.build_kcoil_ecoil_system(
-        copy_number=1, data_dir=data_dir, shuffle=False)
-    return bead_coordinates(built.root_hier, copy_index=0)
+    system = system or system_registry.resolve()
+    built, _, _ = system.build_system(
+        copy_number=1, data_dir=data_dir or system.DATA_DIR, shuffle=False)
+    return bead_coordinates(built.root_hier, copy_index=0, system=system)
 
 
 def trajectory_rmsds(rmf_path: str, copy_number: int, data_dir: str,
-                     reference: np.ndarray) -> np.ndarray:
+                     reference: np.ndarray, system=None) -> np.ndarray:
     """RMSD of every frame in one RMF3 file against the reference."""
+    system = system or system_registry.resolve()
     # A fresh system is built and *linked* to the file, so the trajectory's
     # frames are loaded into particles laid out exactly like the reference's.
-    built, _, _ = system_builder.build_kcoil_ecoil_system(
-        copy_number=copy_number, data_dir=data_dir)
+    built, _, _ = system.build_system(
+        copy_number=copy_number, data_dir=data_dir or system.DATA_DIR)
     handle = RMF.open_rmf_file_read_only(rmf_path)
     IMP.rmf.create_hierarchies(handle, built.model)
     IMP.rmf.link_hierarchies(handle, [built.root_hier])
@@ -115,7 +120,8 @@ def trajectory_rmsds(rmf_path: str, copy_number: int, data_dir: str,
         # Worst copy in the frame -- see the module docstring for why the
         # copies are scored separately rather than superposed together.
         values.append(max(
-            superposed_rmsd(bead_coordinates(built.root_hier, copy_index), reference)
+            superposed_rmsd(
+                bead_coordinates(built.root_hier, copy_index, system=system), reference)
             for copy_index in range(copy_number)))
     return np.asarray(values)
 
@@ -125,17 +131,21 @@ def main(argv=None) -> int:
     parser.add_argument("rmf", nargs="+", help="RMF3 trajectory file(s) to score")
     parser.add_argument("--copy-number", type=int, default=1,
                         help="copy number the trajectory was sampled at (default: %(default)s)")
-    parser.add_argument("--data-dir", default=EXAMPLES_DIR,
-                        help="base directory holding data/ (default: examples/)")
+    system_registry.add_argument(parser)
+    parser.add_argument("--data-dir", default=None,
+                        help="base directory holding data/ (default: the system's own)")
     args = parser.parse_args(argv)
 
-    reference = reference_coordinates(args.data_dir)
-    print(f"reference dimer: {len(reference)} structured beads; scoring {args.copy_number} "
+    system = system_registry.resolve(args.system)
+    data_dir = args.data_dir or system.DATA_DIR
+
+    reference = reference_coordinates(data_dir, system=system)
+    print(f"reference assembly: {len(reference)} structured beads; scoring {args.copy_number} "
           f"cop{'y' if args.copy_number == 1 else 'ies'} per frame\n")
     print(f"{'trajectory':40s} {'frames':>7s} {'first':>8s} {'last':>8s} "
           f"{'best':>8s} {'@frame':>7s}")
     for path in args.rmf:
-        values = trajectory_rmsds(path, args.copy_number, args.data_dir, reference)
+        values = trajectory_rmsds(path, args.copy_number, data_dir, reference, system=system)
         if not len(values):
             print(f"{os.path.basename(path):40s} {'0':>7s}  (empty)")
             continue
