@@ -24,8 +24,8 @@ sampler, from the RMF3 files each run wrote):
   the one quantity a modeller pays for.
 
 Replica exchange runs `imp_rex_replicas` replicas under `imp_rex_launcher`
-(default mpirun) -- see run_imp_rex.py. Load your MPI and IMP modules before
-starting the sweep; the launcher inherits the environment.
+(default "auto": the mpiexec in this Python's env, i.e. the MPI IMP.mpi was
+built with) -- see run_imp_rex.py.
 
 Seeds
 -----
@@ -67,7 +67,7 @@ SAMPLER_DEFAULTS = {
     "n_particles": 100, "n_temperature_steps": 100, "n_mcmc_steps": 10,
     "schedule": "linear", "target_ess": 0.5,
     "imp_rex_frames": 5000, "imp_rex_mc_steps": 10, "imp_rex_max_temp": 2.5,
-    "imp_rex_replicas": 1, "imp_rex_launcher": "mpirun",
+    "imp_rex_replicas": 1, "imp_rex_launcher": "auto",
 }
 
 PROPOSAL_DEFAULTS = {

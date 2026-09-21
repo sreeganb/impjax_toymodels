@@ -183,7 +183,7 @@ mpirun -np 8 python harness/run_imp_rex.py ... &> <case>_imp_rex.out
 once per seed (one replica per rank, `rmfs/<replica>.rmf3` each). Load your
 MPI-enabled IMP and OpenMPI modules before starting the sweep; the launcher
 inherits the environment. `"imp_rex_launcher"` takes extra flags, e.g.
-`"mpirun --oversubscribe"`. Set `"imp_rex_replicas": 1` to run it in-process
+`"mpirun --oversubscribe"`; the default `"auto"` uses the `mpiexec` in your conda env, which matches the MPI IMP was built with. Set `"imp_rex_replicas": 1` to run it in-process
 with no MPI (a laptop smoke test — not a fair replica-exchange baseline).
 
 ### Seeds are not optional here

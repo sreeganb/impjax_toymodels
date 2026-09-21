@@ -128,6 +128,23 @@ class ImpRexLauncherTests(unittest.TestCase):
                             ("--output-dir", "out/rex")):
             self.assertEqual(argv[argv.index(flag) + 1], value)
 
+    def test_auto_launcher_prefers_the_mpiexec_beside_this_python(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_python = os.path.join(tmpdir, "python")
+            mpiexec = os.path.join(tmpdir, "mpiexec")
+            with open(mpiexec, "w") as handle:
+                handle.write("#!/bin/sh\n")
+            os.chmod(mpiexec, 0o755)
+            with mock.patch.object(run_imp_rex.sys, "executable", fake_python):
+                self.assertEqual(run_imp_rex.resolve_launcher("auto"), [mpiexec])
+            with mock.patch.object(run_imp_rex.sys, "executable",
+                                   os.path.join(tmpdir, "none", "python")):
+                self.assertEqual(run_imp_rex.resolve_launcher("auto"), ["mpirun"])
+
+    def test_explicit_launcher_is_used_as_given(self):
+        self.assertEqual(run_imp_rex.resolve_launcher("mpirun --oversubscribe"),
+                         ["mpirun", "--oversubscribe"])
+
     def test_launched_ranks_reads_the_launcher_environment(self):
         with mock.patch.dict(os.environ, {"OMPI_COMM_WORLD_SIZE": "8"}):
             self.assertEqual(run_imp_rex.launched_ranks(), 8)

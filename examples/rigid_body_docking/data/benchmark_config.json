@@ -66,6 +66,6 @@
     "imp_rex_mc_steps": 10,
     "imp_rex_max_temp": 4.0,
     "imp_rex_replicas": 8,
-    "imp_rex_launcher": "mpirun"
+    "imp_rex_launcher": "auto"
   }
 }

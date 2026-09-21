@@ -10,7 +10,12 @@ the way IMP users actually run it: many replicas in parallel under MPI,
 Each rank is one replica. IMP.pmi.macros.ReplicaExchange builds a geometric
 temperature ladder from 1 to --max-temp across however many ranks there are,
 and every rank writes its own trajectory, rmfs/<replica>.rmf3, and its own
-stat.<replica>.out. Load your MPI and IMP modules first; nothing here does.
+stat.<replica>.out.
+
+The launcher must belong to the same MPI that IMP.mpi was built against. By
+default (`resolve_launcher("auto")`) the benchmark uses the mpiexec installed
+next to this Python, which in a conda env is exactly that one -- so do NOT
+rely on a `module load`ed Open MPI mpirun to launch a conda (MPICH) IMP.
 
 benchmark_pipeline.py launches exactly this command when a config sets
 "imp_rex_replicas" > 1 (see `launch`), so a sweep on the lab machine needs no
@@ -76,6 +81,30 @@ def replica_exchange_object():
     return IMP.mpi.ReplicaExchange()
 
 
+def resolve_launcher(setting: str = "auto") -> list:
+    """The MPI launcher command, as an argv prefix.
+
+    "auto" (the default) picks the `mpiexec` installed next to this Python --
+    in a conda env, that is the launcher of the MPI that IMP.mpi was linked
+    against. That matters: an MPICH-built IMP (conda-forge's default) cannot
+    start under Open MPI's `mpirun`, and fails in MPI_Init with "launcher not
+    compatible with PMI1 client". A `module load`ed Open MPI puts exactly that
+    mpirun first on PATH. Falls back to `mpirun` on PATH. Any other value is
+    used as given, e.g. "mpirun --oversubscribe".
+    """
+    if setting and setting != "auto":
+        return shlex.split(setting)
+    for name in ("mpiexec", "mpirun"):
+        candidate = os.path.join(os.path.dirname(sys.executable), name)
+        if os.access(candidate, os.X_OK):
+            return [candidate]
+    return ["mpirun"]
+
+
+#: Launcher output that means the launcher and IMP.mpi's MPI do not match.
+MISMATCH_SIGNS = ("launcher not compatible with PMI", "PMI_Init returned", "pmi1_init")
+
+
 def run(system_name: str, copy_number: int, distance_csv, seed: int, frames: int,
         mc_steps: int, max_temp: float, output_dir: str) -> dict:
     """Run this rank's replica and write its timing file. Returns the timing."""
@@ -138,14 +167,20 @@ def launch(args, output_dir: str) -> dict:
         run(args.system, args.copy_number, getattr(args, "distance_csv", None), args.seed,
             args.imp_rex_frames, args.imp_rex_mc_steps, args.imp_rex_max_temp, output_dir)
     else:
-        launcher = shlex.split(getattr(args, "imp_rex_launcher", "mpirun"))
+        launcher = resolve_launcher(getattr(args, "imp_rex_launcher", "auto"))
         argv = launcher + ["-np", str(replicas)] + command(args, output_dir)
         log_path = f"{output_dir}.out"
         print(f"    {shlex.join(argv)} &> {log_path}", flush=True)
         with open(log_path, "w") as log:
             completed = subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT)
         if completed.returncode != 0:
-            raise RuntimeError(f"replica exchange exited {completed.returncode}; see {log_path}")
+            with open(log_path, errors="replace") as log:
+                mismatch = any(sign in log.read() for sign in MISMATCH_SIGNS)
+            hint = (f" -- {launcher[0]} belongs to a different MPI than the one IMP.mpi "
+                    "was built with; set imp_rex_launcher to \"auto\" (this env's own "
+                    "mpiexec) or to that MPI's launcher" if mismatch else "")
+            raise RuntimeError(
+                f"replica exchange exited {completed.returncode}; see {log_path}{hint}")
 
     timings = []
     for name in sorted(os.listdir(output_dir)):

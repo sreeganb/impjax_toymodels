@@ -205,8 +205,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imp-rex-replicas", type=int, default=1,
                         help="replicas, one per MPI rank; > 1 launches run_imp_rex.py under "
                              "--imp-rex-launcher (load your MPI/IMP modules first)")
-    parser.add_argument("--imp-rex-launcher", default="mpirun",
-                        help='MPI launcher, e.g. "mpirun" or "mpirun --oversubscribe"')
+    parser.add_argument("--imp-rex-launcher", default="auto",
+                        help='MPI launcher; "auto" = the mpiexec in this Python env '
+                             '(matches IMP.mpi), or e.g. "mpirun --oversubscribe"')
 
     parser.add_argument("--debug", action="store_true", help="verify JAX vs CPU-IMP scores (rmh/smc only)")
     parser.add_argument("--distance-csv", default=None,
