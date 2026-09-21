@@ -281,6 +281,7 @@ def run_smc_sampling(
     verbose: bool = True,
     rmf_path: Optional[str] = None,
     stat_path: Optional[str] = None,
+    population_rmf_path: Optional[str] = None,
     log_path: Optional[str] = None,
     debug: bool = False,
     debug_every: int = 1,
@@ -322,6 +323,13 @@ def run_smc_sampling(
         model as built (see smc_particles.initialize_particles).
     debug_every : "every debug_every temperature steps" (default: every step,
         since there are typically only tens of them).
+    population_rmf_path : if given, the *final* particle population -- all
+        `n_particles` of them, at lambda = 1 -- is written here as one RMF3
+        frame per particle (plus a "_stats.csv" beside it holding each
+        particle's log-posterior). This is SMC's actual output: a weighted
+        sample from the posterior, and the pool a "best-scoring models"
+        analysis should draw from. `rmf_path` alone only holds the anneal's
+        best particle per step, which is a progress trace, not a sample.
 
     Other parameters mirror run_sampling's (mode, sigmas, sync_back,
     rmf_path/stat_path/log_path, debug/score_comparison_path).
@@ -419,6 +427,9 @@ def run_smc_sampling(
     elif sync_back and best_thetas:
         state_sync.apply(best_thetas[-1], context.layout, built_system)
 
+    if population_rmf_path is not None:
+        write_population(population_rmf_path, state.particles, context, built_system)
+
     run_logger.info(
         "run_smc_sampling finished: variant=%s, %d temperature steps, best log-post=%.2f%s",
         variant,
@@ -428,3 +439,21 @@ def run_smc_sampling(
     )
 
     return best_thetas, best_scores, lambdas
+
+
+def write_population(rmf_path: str, particles, context: WrapperContext, built_system) -> None:
+    """Write every particle of a (final) SMC population as one RMF3 frame each.
+
+    The whole population is scored in one batched device call and pulled to
+    host in one transfer (np.asarray on the stacked pytree), then handed to
+    gpu_io.write_block as a single block -- the same "one transfer per block"
+    boundary the trajectory writers use. Frames are written in particle
+    order; the stat file beside the RMF3 records each one's log-posterior.
+    """
+    scores = np.asarray(smc_particles.batched_scorer(context.log_prob_fn)(particles))
+    host_particles = jax.tree_util.tree_map(np.asarray, particles)
+    thetas = [smc_particles.select_particle(host_particles, index)
+              for index in range(smc_particles.particle_count(host_particles))]
+    stat_path = f"{os.path.splitext(rmf_path)[0]}_stats.csv"
+    with gpu_io.TrajectoryWriter(rmf_path, stat_path, built_system.root_hier) as writer:
+        gpu_io.write_block(writer, thetas, scores, context.layout, built_system)

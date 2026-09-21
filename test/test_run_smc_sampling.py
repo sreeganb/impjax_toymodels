@@ -75,6 +75,28 @@ class RunSmcSamplingTests(unittest.TestCase):
                 theta_now["bead_coords"], best_thetas[-1]["bead_coords"], atol=1e-6
             )
 
+    def test_population_rmf_path_writes_every_final_particle(self):
+        """The final population is SMC's posterior sample, so all of it is kept."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            population_path = os.path.join(tmpdir, "smc_population.rmf3")
+            wrapper_impjax.run_smc_sampling(
+                self.built,
+                self.sf,
+                jax.random.PRNGKey(2),
+                variant="tempered",
+                n_particles=6,
+                n_temperature_steps=3,
+                n_mcmc_steps=2,
+                population_rmf_path=population_path,
+                verbose=False,
+            )
+            handle = RMF.open_rmf_file_read_only(population_path)
+            self.assertEqual(handle.get_number_of_frames(), 6)
+            with open(os.path.join(tmpdir, "smc_population_stats.csv"), newline="") as f:
+                rows = list(csv.reader(f))
+            self.assertEqual(len(rows) - 1, 6)
+            self.assertTrue(all(np.isfinite(float(row[1])) for row in rows[1:]))
+
     def test_debug_mode_writes_score_comparison_for_every_temperature_step(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "smc.log")
