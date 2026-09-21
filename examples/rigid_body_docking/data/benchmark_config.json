@@ -1,7 +1,6 @@
 {
   "name": "1avx_docking_sweep",
   "system": "docking_system",
-  "metrics_module": "docking_metrics",
   "output_dir": "out/benchmark_4res",
   "copy_numbers": [
     1
@@ -13,11 +12,17 @@
     "smc_adaptive",
     "imp_rex"
   ],
-  "score_window": 100,
-  "score_window_fraction": 0.25,
-  "satisfaction_tolerance": 2.0,
+  "n_best_models": 50,
+  "burnin_fraction": 0.25,
+  "success_rmsd": 5.0,
   "seed": 0,
-  "seeds": [0, 1, 2, 3, 4],
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
   "prior": "split+box",
   "prior_box_half_width": 100.0,
   "ground_truth": {
@@ -51,7 +56,6 @@
   },
   "sampler_params": {
     "n_steps": 30000,
-    "burnin": 100,
     "thin": 5,
     "n_particles": 100,
     "n_temperature_steps": 100,
@@ -60,6 +64,8 @@
     "target_ess": 0.6,
     "imp_rex_frames": 60000,
     "imp_rex_mc_steps": 10,
-    "imp_rex_max_temp": 4.0
+    "imp_rex_max_temp": 4.0,
+    "imp_rex_replicas": 8,
+    "imp_rex_launcher": "mpirun"
   }
 }

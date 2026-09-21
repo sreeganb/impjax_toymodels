@@ -1,32 +1,40 @@
-"""Turn a benchmark sweep's records into a multi-page PDF report.
+"""Turn a benchmark sweep's records into a short multi-page PDF report.
 
 Split out from benchmark_pipeline.py so a report can be re-rendered from a
-finished results.json without re-running anything (`--skip-run`), which is what
-you want while iterating on how the results are presented.
+finished results.json without re-running anything (`--skip-run`).
+
+Pages, in reading order
+-----------------------
+1. **Summary** -- one row per sampler: how many seeds it solved, how long that
+   took, and how accurate its best-scoring models are. The whole argument on
+   one page.
+2. **Time to solution** -- wall seconds until a run's best-scoring model is
+   within `success_rmsd` of the ground truth, one point per seed. This is the
+   comparison that folds in both sampling efficiency and hardware: an SMC
+   population evaluated in parallel on a GPU shortens it directly, a replica
+   ladder spread over N CPU ranks shortens it only as far as N allows.
+3. **Score convergence** -- best IMP score found so far against wall time, one
+   line per seed, with the ground-truth score as the target line.
+4. **RMSD of the best-scoring models** -- every one of each run's
+   `n_best_models` lowest-scoring models, seeds pooled.
+5. **All runs** -- every number as text.
+
+Every score is IMP's, re-evaluated on the CPU with the full scoring function,
+never a sampler's own log-posterior, so all samplers sit on one scale.
 
 Chart conventions
 -----------------
-Colour identifies the **sampler**, in a fixed order, and the same sampler wears
-the same colour on every page -- colour follows the entity, never its rank or
-its position in a filtered list.  The five hues are the first five slots of a
-palette validated for colour-vision deficiency: worst adjacent CVD deltaE 9.1
-and worst normal-vision deltaE 19.6 (OKLab x100, against targets of 8 and 15).
-
-Three of those hues sit below 3:1 contrast on a white page, which obliges
-visible labels rather than colour alone -- so every sampler is also named on
-the category axis or directly labelled, carries its own marker shape, and the
-whole sweep is reproduced as a table on the last page.  Nothing here is
-readable only by hue.
-
-Distributions are drawn as the individual frames in the scoring window, not as
-a mean: the spread across the last N frames *is* the result for a sampler that
-returns an ensemble, and averaging it away would hide exactly the difference
-between a converged run and a wandering one.
+Colour identifies the sampler, in a fixed order, on every page -- it follows
+the entity, never its rank. The five hues are the first five slots of a
+palette validated for colour-vision deficiency (worst adjacent CVD deltaE 9.1,
+worst normal-vision deltaE 19.6, OKLab x100). Three of them sit below 3:1
+contrast on white, so every sampler also has its own marker shape, is named on
+the axis or in the legend, and appears in the text table.
 """
 
 import json
 import os
-from typing import Dict, List, Sequence
+from typing import List, Sequence
 
 import numpy as np
 
@@ -36,8 +44,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.lines import Line2D
 
-#: Fixed sampler -> (colour, marker) assignment.  Order is the palette's, and
-#: markers are a second, colour-independent channel for print and CVD.
+#: Fixed sampler -> (colour, marker) assignment.
 SERIES_STYLE = {
     "rmh":          ("#2a78d6", "o"),
     "smc":          ("#eb6834", "s"),
@@ -51,11 +58,8 @@ INK = "#0b0b0b"
 INK_SOFT = "#52514e"
 GRID = "#d9d8d4"
 
-#: Arrays that have to survive the JSON round trip for --skip-run.
-#: Per-frame arrays a record may carry. The last three are only present when
-#: a config names a `metrics_module` supplying them (the CAPRI docking scores).
-ARRAY_FIELDS = ("rmsd", "imp_score", "satisfied",
-                "ligand_rmsd", "interface_rmsd", "fnat")
+#: Per-run arrays that must survive the JSON round trip for --skip-run.
+ARRAY_FIELDS = ("best_scores", "best_rmsds", "trace_time", "trace_score", "trace_rmsd")
 
 
 def style_of(sampler: str):
@@ -68,7 +72,7 @@ def save_records(path: str, records: Sequence[dict]) -> None:
     for record in records:
         row = dict(record)
         for field in ARRAY_FIELDS:
-            if field in row and row[field] is not None:
+            if row.get(field) is not None:
                 row[field] = np.asarray(row[field]).tolist()
         serialisable.append(row)
     with open(path, "w") as handle:
@@ -81,16 +85,39 @@ def load_records(path: str) -> List[dict]:
     for record in records:
         for field in ARRAY_FIELDS:
             if record.get(field) is not None:
-                record[field] = np.asarray(record[field])
+                record[field] = np.asarray(record[field], dtype=float)
     return records
 
 
-def _frame(axes, ylabel: str, title: str = "") -> None:
+# --------------------------------------------------------------------------- helpers
+
+def _samplers(records) -> List[str]:
+    """Samplers present, in the palette's fixed order."""
+    present = {r["sampler"] for r in records}
+    ordered = [s for s in SERIES_STYLE if s in present]
+    return ordered + sorted(present - set(ordered))
+
+
+def _runs(records, copy_number, sampler) -> List[dict]:
+    return [r for r in records if r["copy_number"] == copy_number
+            and r["sampler"] == sampler and not r.get("failure")]
+
+
+def _median(values) -> float:
+    values = [v for v in values if v is not None and np.isfinite(v)]
+    return float(np.median(values)) if values else float("nan")
+
+
+def _fmt(value, spec=".1f", missing="-") -> str:
+    return missing if value is None or not np.isfinite(value) else format(value, spec)
+
+
+def _frame(axes, ylabel: str = "", title: str = "") -> None:
     """Recessive grid and axes, so the marks carry the chart."""
     axes.set_ylabel(ylabel, color=INK_SOFT, fontsize=9)
     if title:
         axes.set_title(title, color=INK, fontsize=10, pad=8)
-    axes.grid(axis="y", color=GRID, linewidth=0.6, alpha=0.9)
+    axes.grid(axis="y", color=GRID, linewidth=0.6)
     axes.set_axisbelow(True)
     for side in ("top", "right"):
         axes.spines[side].set_visible(False)
@@ -99,156 +126,70 @@ def _frame(axes, ylabel: str, title: str = "") -> None:
     axes.tick_params(colors=INK_SOFT, labelsize=8)
 
 
-def _legend(figure, samplers: Sequence[str]) -> None:
-    """A legend is always present for two or more series."""
+def _legend(figure, samplers, extra=()) -> None:
     handles = [Line2D([], [], color=style_of(s)[0], marker=style_of(s)[1],
-                      linestyle="none", markersize=7, label=s)
-               for s in samplers]
-    figure.legend(handles=handles, loc="lower center", ncol=min(len(samplers), 5),
-                  frameon=False, fontsize=8, labelcolor=INK_SOFT,
-                  bbox_to_anchor=(0.5, 0.005))
+                      markersize=7, linewidth=2, label=s) for s in samplers]
+    figure.legend(handles=handles + list(extra), loc="lower center",
+                  ncol=min(len(handles) + len(extra), 6), frameon=False,
+                  fontsize=8, labelcolor=INK_SOFT, bbox_to_anchor=(0.5, 0.005))
 
 
-def _window_panels(pdf, records, field, ylabel, title, subtitle, log=False):
-    """One panel per copy number; every frame in the window drawn as a point."""
+def _page(records, title, subtitle):
+    """A figure with one panel per copy number, titled."""
     copy_numbers = sorted({r["copy_number"] for r in records})
-    samplers = [s for s in SERIES_STYLE
-                if any(r["sampler"] == s for r in records)]
-    samplers += [r["sampler"] for r in records if r["sampler"] not in SERIES_STYLE]
-    samplers = list(dict.fromkeys(samplers))
+    figure, axes = plt.subplots(1, len(copy_numbers), figsize=(11, 5.4), squeeze=False)
+    figure.text(0.5, 0.955, title, ha="center", fontsize=14, color=INK)
+    figure.text(0.5, 0.925, subtitle, ha="center", va="top", fontsize=8.5, color=INK_SOFT)
+    return figure, list(zip(axes[0], copy_numbers))
 
-    figure, axes_row = plt.subplots(
-        1, len(copy_numbers), figsize=(11, 5.2), sharey=True, squeeze=False)
-    figure.suptitle(title, fontsize=13, color=INK, x=0.5, y=0.97)
-    figure.text(0.5, 0.915, subtitle, ha="center", fontsize=8.5, color=INK_SOFT)
 
-    for axis, copy_number in zip(axes_row[0], copy_numbers):
-        positions, labels = [], []
-        for index, sampler in enumerate(samplers):
-            match = [r for r in records
-                     if r["copy_number"] == copy_number and r["sampler"] == sampler]
-            positions.append(index)
-            labels.append(sampler.replace("smc_", "smc\n"))
-            if not match or match[0].get(field) is None:
-                continue
-            values = np.asarray(match[0][field], dtype=float)
-            if not values.size:
-                continue
-            colour, marker = style_of(sampler)
-            jitter = (np.random.default_rng(index).random(values.size) - 0.5) * 0.28
-            axis.scatter(index + jitter, values, s=14, color=colour, marker=marker,
-                         alpha=0.55, linewidths=0.6, edgecolors="white", zorder=3)
-            # Median as a short rule: one direct, unambiguous readout per series.
-            median = float(np.median(values))
-            axis.plot([index - 0.32, index + 0.32], [median, median],
-                      color=colour, linewidth=2.0, solid_capstyle="round", zorder=4)
-            axis.annotate(f"{median:.3g}", (index + 0.34, median), fontsize=7,
-                          color=INK_SOFT, va="center", ha="left")
-        axis.set_xticks(positions)
-        axis.set_xticklabels(labels, fontsize=7.5)
-        axis.set_xlim(-0.7, len(samplers) - 0.3)
-        if log:
-            axis.set_yscale("log")
-        _frame(axis, ylabel if copy_number == copy_numbers[0] else "",
-               f"copy number {copy_number}")
-
-    _legend(figure, samplers)
-    figure.tight_layout(rect=[0, 0.06, 1, 0.90])
+def _finish(pdf, figure) -> None:
+    figure.tight_layout(rect=[0, 0.06, 1, 0.84])
     pdf.savefig(figure)
     plt.close(figure)
 
 
-def _autoscale(axis, values, set_scale) -> None:
-    """Use a log scale only if the values span more than a decade."""
-    finite = [v for v in values if v is not None and np.isfinite(v) and v > 0]
-    if finite and max(finite) / min(finite) > 10.0:
-        set_scale("log")
+def _category_axis(axis, samplers) -> None:
+    axis.set_xticks(range(len(samplers)))
+    axis.set_xticklabels([s.replace("smc_", "smc\n") for s in samplers], fontsize=7.5)
+    axis.set_xlim(-0.7, len(samplers) - 0.3)
 
 
-def _scaling_page(pdf, records):
-    """System size against wall time, one line per sampler."""
-    samplers = list(dict.fromkeys(r["sampler"] for r in records))
-    figure, (left, right) = plt.subplots(1, 2, figsize=(11, 5.2))
-    figure.suptitle("Scaling with system size", fontsize=13, color=INK, y=0.97)
-    figure.text(0.5, 0.915,
-                "Restraint count is held to the same per-copy selection, so the "
-                "growth is in degrees of freedom, not in data.",
-                ha="center", fontsize=8.5, color=INK_SOFT)
-
-    for axis, key, ylabel in ((left, "wall_time", "wall time (s)"),
-                              (right, "cpu_time", "CPU time (s)")):
-        for sampler in samplers:
-            rows = sorted((r for r in records
-                           if r["sampler"] == sampler and not r.get("failure")),
-                          key=lambda r: r["n_dof"])
-            if not rows:
-                continue
-            colour, marker = style_of(sampler)
-            xs = [r["n_dof"] for r in rows]
-            ys = [r[key] for r in rows]
-            axis.plot(xs, ys, color=colour, marker=marker, markersize=8,
-                      linewidth=2.0, markeredgecolor="white", markeredgewidth=1.0)
-            axis.annotate(sampler, (xs[-1], ys[-1]), fontsize=7.5, color=INK_SOFT,
-                          xytext=(6, 0), textcoords="offset points", va="center",
-                          annotation_clip=False)
-        axis.set_xlabel("sampled degrees of freedom", color=INK_SOFT, fontsize=9)
-        # Log axes only when the data actually spans decades. Over the 2x range
-        # a three-copy sweep covers, a log axis buys nothing and its minor tick
-        # labels collide; and the right margin has to leave room for the direct
-        # labels, which sit outside the last marker.
-        _autoscale(axis, [r["n_dof"] for r in records], axis.set_xscale)
-        _autoscale(axis, [r[key] for r in records if not r.get("failure")],
-                   axis.set_yscale)
-        axis.margins(x=0.28, y=0.12)
-        _frame(axis, ylabel)
-
-    figure.tight_layout(rect=[0, 0.03, 1, 0.90])
-    pdf.savefig(figure)
-    plt.close(figure)
+def _jitter(n, seed) -> np.ndarray:
+    return (np.random.default_rng(seed).random(n) - 0.5) * 0.3
 
 
-def _table_page(pdf, config, records):
-    """Every number in the sweep, as text.
+# --------------------------------------------------------------------------- pages
 
-    This page is not decoration: three of the series hues fall below 3:1
-    contrast on white, and the rule for that is that the data must also be
-    reachable without relying on colour.
-    """
-    figure = plt.figure(figsize=(11, 8.5))
-    figure.suptitle("All results", fontsize=13, color=INK, y=0.96)
-
-    header = ["copies", "sampler", "DOF", "restr.", "wall s", "cpu s",
-              "RMSD min", "RMSD med", "IMP min", "IMP med", "satisfied", "note"]
+def _summary_rows(config, records):
     rows = []
-    for record in sorted(records, key=lambda r: (r["copy_number"], r["sampler"])):
-        def stat(field, fn):
-            values = record.get(field)
-            if values is None or not len(np.asarray(values)):
-                return "-"
-            return f"{fn(np.asarray(values, dtype=float)):.4g}"
-        rows.append([
-            str(record["copy_number"]), record["sampler"], str(record.get("n_dof", "-")),
-            str(record.get("n_restraints", "-")),
-            f"{record['wall_time']:.1f}",
-            "-" if np.isnan(record.get("cpu_time", float("nan"))) else f"{record['cpu_time']:.1f}",
-            stat("rmsd", np.min), stat("rmsd", np.median),
-            stat("imp_score", np.min), stat("imp_score", np.median),
-            "-" if record.get("satisfied") is None
-            else f"{100*float(np.max(record['satisfied'])):.0f}%",
-            (record.get("failure") or record.get("note") or "")[:22],
-        ])
+    for copy_number in sorted({r["copy_number"] for r in records}):
+        for sampler in _samplers(records):
+            runs = _runs(records, copy_number, sampler)
+            if not runs:
+                continue
+            solved = [r["time_to_solution"] for r in runs if np.isfinite(r["time_to_solution"])]
+            best_model = [r["best_rmsds"][0] for r in runs if len(r["best_rmsds"])]
+            rows.append([
+                str(copy_number), sampler,
+                f"{len(solved)}/{len(runs)}",
+                _fmt(_median(solved)),
+                _fmt(_median(best_model), ".2f"),
+                _fmt(_median([_median(r["best_rmsds"]) for r in runs]), ".2f"),
+                _fmt(_median([r["wall_time"] for r in runs])),
+                _fmt(_median([r["cpu_time"] for r in runs])),
+            ])
+    return rows
 
-    table = figure.add_subplot(111)
-    table.axis("off")
-    # Explicit widths: the note column is the only variable-length field, so
-    # without them it overflows its cell and runs past the table edge.
-    widths = [0.05, 0.11, 0.05, 0.05, 0.06, 0.06,
-              0.08, 0.08, 0.09, 0.09, 0.07, 0.18]
-    rendered = table.table(cellText=rows, colLabels=header, loc="upper center",
-                           cellLoc="center", colWidths=widths)
+
+def _table(figure, rect, header, rows, widths, sampler_col=1):
+    axis = figure.add_axes(rect)
+    axis.axis("off")
+    rendered = axis.table(cellText=rows, colLabels=header, loc="upper center",
+                          cellLoc="center", colWidths=widths)
     rendered.auto_set_font_size(False)
-    rendered.set_fontsize(7)
-    rendered.scale(1, 1.35)
+    rendered.set_fontsize(8)
+    rendered.scale(1, 1.5)
     for (row, col), cell in rendered.get_celld().items():
         cell.set_edgecolor(GRID)
         cell.set_linewidth(0.5)
@@ -256,102 +197,197 @@ def _table_page(pdf, config, records):
             cell.set_text_props(color=INK, fontweight="bold")
         else:
             cell.set_text_props(color=INK_SOFT)
-            if col == 1:  # a colour chip beside the name, never instead of it
-                cell.get_text().set_color(style_of(rows[row - 1][1])[0])
-    pdf.savefig(figure)
-    plt.close(figure)
+            if col == sampler_col:  # colour chip beside the name, never instead of it
+                cell.get_text().set_color(style_of(rows[row - 1][sampler_col])[0])
 
 
 def _summary_page(pdf, config, records):
     figure = plt.figure(figsize=(11, 8.5))
-    figure.text(0.08, 0.92, config.get("name", "benchmark"), fontsize=22, color=INK)
-    figure.text(0.08, 0.875, "IMP + JAX/BlackJAX sampler benchmark",
-                fontsize=12, color=INK_SOFT)
+    figure.text(0.06, 0.93, config.get("name", "benchmark"), fontsize=22, color=INK)
+    figure.text(0.06, 0.895, "IMP + JAX/BlackJAX sampler benchmark", fontsize=12, color=INK_SOFT)
 
     backends = sorted({r.get("backend", "?") for r in records})
-    failures = [r for r in records if r.get("failure")]
+    seeds = sorted({r["seed"] for r in records})
+    replicas = config.get("sampler_params", {}).get("imp_rex_replicas", 1)
     lines = [
-        f"system            {config.get('system', '?')}",
-        f"copy numbers      {config['copy_numbers']}",
-        f"samplers          {', '.join(config['samplers'])}",
-        f"JAX backend       {', '.join(backends)}",
-        f"prior             {config.get('prior')}",
-        f"restraints        {config.get('restraints')}",
-        f"scoring window    last {config.get('score_window')} frames",
-        f"satisfaction tol  {config.get('satisfaction_tolerance')} A",
-        f"cases run         {len(records)}"
-        + (f"   ({len(failures)} failed)" if failures else ""),
+        f"system {config.get('system', '?')}   |   copy numbers {config['copy_numbers']}   |   "
+        f"seeds {seeds}   |   JAX backend {', '.join(backends)}   |   imp_rex replicas {replicas}",
+        f"accuracy = RMSD to the unshuffled build, over the {config['n_best_models']} "
+        f"best-scoring models after a {100 * config['burnin_fraction']:.0f}% burn-in   |   "
+        f"solved = best-scoring model within {config['success_rmsd']} A",
     ]
     for index, line in enumerate(lines):
-        figure.text(0.08, 0.79 - 0.035 * index, line, fontsize=10,
-                    color=INK_SOFT, family="monospace")
+        figure.text(0.06, 0.84 - 0.03 * index, line, fontsize=9, color=INK_SOFT)
 
-    notes = (
-        "Scores on the score pages are computed by IMP on the CPU, by loading each frame back\n"
-        "into an IMP model and evaluating the scoring function. They are NOT the BlackJAX\n"
-        "log-posterior, which is -S(theta) + log p0(theta) -- a different quantity that would\n"
-        "make BlackJAX and IMP samplers incomparable.\n\n"
-        "RMSD is superposed, over structured beads only, against the ground-truth structure.\n"
-        "The flexible linker is excluded: it has no reference conformation to be right about.\n\n"
-        "Every point is one frame from the scoring window. The spread is the result, not noise."
-    )
-    figure.text(0.08, 0.40, notes, fontsize=9, color=INK_SOFT, va="top")
+    header = ["copies", "sampler", "seeds solved", "time to solution (s)",
+              "best-model RMSD (A)", f"best-{config['n_best_models']} RMSD (A)",
+              "wall (s)", "CPU (s)"]
+    _table(figure, [0.06, 0.25, 0.88, 0.52], header, _summary_rows(config, records),
+           [0.07, 0.14, 0.11, 0.16, 0.15, 0.15, 0.1, 0.1])
+
+    notes = ("Medians over seeds. Time to solution counts only seeds that were solved. "
+             "Wall time is the sampler alone; for\nimp_rex it is the slowest replica, "
+             "and CPU time is summed over replicas.")
+    figure.text(0.06, 0.17, notes, fontsize=8.5, color=INK_SOFT, va="top")
     if backends == ["cpu"]:
-        figure.text(0.08, 0.13,
-                    "NOTE: JAX ran on CPU for this sweep, so no CPU-vs-GPU comparison is\n"
-                    "possible from these numbers. Re-run on a GPU host to populate it.",
-                    fontsize=9, color="#e34948", va="top")
+        figure.text(0.06, 0.10,
+                    "JAX ran on CPU here. The BlackJAX samplers score whole populations in "
+                    "one vectorised call, so their wall time is the\nnumber a GPU run changes; "
+                    "re-run this config on a GPU host to measure it.",
+                    fontsize=8.5, color="#c8372d", va="top")
     pdf.savefig(figure)
     plt.close(figure)
 
 
-def _docking_pages(pdf, records) -> None:
-    """The CAPRI-style pages, when the sweep produced them.
+def _time_to_solution_page(pdf, config, records):
+    figure, panels = _page(
+        records, "Time to solution",
+        f"Wall seconds until the run's best-scoring model is within {config['success_rmsd']} A "
+        "of the ground truth. One point per seed; lower is better.\n"
+        "Seeds that never got there sit in the 'not solved' band at the top.")
+    samplers = _samplers(records)
+    for axis, copy_number in panels:
+        solved_values, unsolved = [], []
+        for index, sampler in enumerate(samplers):
+            runs = _runs(records, copy_number, sampler)
+            times = np.array([r["time_to_solution"] for r in runs], dtype=float)
+            ok = times[np.isfinite(times)]
+            solved_values.extend(ok)
+            unsolved.append((index, int((~np.isfinite(times)).sum())))
+            colour, marker = style_of(sampler)
+            axis.scatter(index + _jitter(ok.size, index), ok, s=40, color=colour,
+                         marker=marker, edgecolors="white", linewidths=0.8, zorder=3)
+            if ok.size:
+                median = float(np.median(ok))
+                axis.plot([index - 0.3, index + 0.3], [median] * 2, color=colour,
+                          linewidth=2, solid_capstyle="round", zorder=4)
+                axis.annotate(f"{median:.3g}s", (index + 0.33, median), fontsize=7,
+                              color=INK_SOFT, va="center")
+        top = max(solved_values) * 1.6 if solved_values else 10.0
+        bottom = min(solved_values) / 1.6 if solved_values else 1.0
+        axis.set_yscale("log")
+        axis.set_ylim(bottom, top * 1.6)
+        axis.axhspan(top, top * 1.6, color=GRID, alpha=0.35, zorder=0)
+        for index, count in unsolved:
+            if count:
+                axis.text(index, top * 1.25, f"{count} not solved", ha="center",
+                          va="center", fontsize=7, color=INK_SOFT)
+        _category_axis(axis, samplers)
+        _frame(axis, "wall seconds (log)", f"copy number {copy_number}")
+    _legend(figure, samplers)
+    _finish(pdf, figure)
 
-    Skipped entirely for a system whose config names no metrics_module, so one
-    report layout serves both examples.
-    """
-    if not any(record.get("ligand_rmsd") is not None for record in records):
-        return
 
-    _window_panels(
-        pdf, records, "ligand_rmsd", "ligand RMSD (A)",
-        "Docking accuracy: CAPRI ligand RMSD",
-        "Receptor superposed, ligand measured -- so the whole error lands on the "
-        "relative placement,\nwhich a global RMSD spreads across both partners. "
-        "Lower is better.")
-    _window_panels(
-        pdf, records, "interface_rmsd", "interface RMSD (A)",
-        "Docking accuracy: CAPRI interface RMSD",
-        "Interface beads only, defined from the reference structure. Insensitive to "
-        "the lever arm\nthat inflates ligand RMSD when a distant part of the ligand "
-        "swings. Lower is better.")
-    _window_panels(
-        pdf, records, "fnat", "fraction of native contacts",
-        "Docking accuracy: fraction of native contacts (fnat)",
-        "Needs no superposition at all -- it only looks at distances between the two "
-        "molecules.\nHigher is better; 1.0 means every native contact was recovered.")
+def _convergence_page(pdf, config, records):
+    figure, panels = _page(
+        records, "Score convergence",
+        "Best IMP score found so far against wall time; one line per seed. "
+        "Dashed: the IMP score of the ground truth.\n"
+        "A curve that reaches the dashed line sooner has found a structure as good as the "
+        "true one sooner.")
+    samplers = _samplers(records)
+    for axis, copy_number in panels:
+        all_scores = []
+        for sampler in samplers:
+            colour, marker = style_of(sampler)
+            for run in _runs(records, copy_number, sampler):
+                times, scores = run["trace_time"], run["trace_score"]
+                if not len(times):
+                    continue
+                # Extend the last value to the end of the run: it is still the best.
+                xs = np.append(times, max(run["wall_time"], times[-1]))
+                ys = np.append(scores, scores[-1])
+                axis.step(xs, ys, where="post", color=colour, linewidth=1.4, alpha=0.8)
+                axis.plot(xs[-1], ys[-1], marker=marker, color=colour, markersize=6,
+                          markeredgecolor="white")
+                all_scores.extend(scores)
+        reference = [r["reference_score"] for r in records if r["copy_number"] == copy_number]
+        if reference:
+            axis.axhline(reference[0], color=INK_SOFT, linewidth=1, linestyle="--")
+            all_scores.append(reference[0])
+        positive = [s for s in all_scores if s > 0]
+        axis.set_xscale("log")
+        if positive and len(positive) == len(all_scores) and max(positive) / min(positive) > 10:
+            axis.set_yscale("log")
+        axis.set_xlabel("wall seconds (log)", color=INK_SOFT, fontsize=9)
+        _frame(axis, "best IMP score so far", f"copy number {copy_number}")
+    target = Line2D([], [], color=INK_SOFT, linestyle="--", linewidth=1,
+                    label="ground-truth score")
+    _legend(figure, samplers, extra=[target])
+    _finish(pdf, figure)
+
+
+def _best_models_page(pdf, config, records):
+    n_best = config["n_best_models"]
+    figure, panels = _page(
+        records, f"RMSD of the {n_best} best-scoring models",
+        f"Each run's {n_best} lowest IMP-score models after a "
+        f"{100 * config['burnin_fraction']:.0f}% burn-in, all seeds pooled; RMSD to the "
+        "unshuffled build,\none superposition over every rigid-body bead. The rule is the "
+        f"median; dashed is the {config['success_rmsd']} A success threshold. Lower is better.")
+    samplers = _samplers(records)
+    for axis, copy_number in panels:
+        for index, sampler in enumerate(samplers):
+            runs = _runs(records, copy_number, sampler)
+            values = np.concatenate([r["best_rmsds"] for r in runs]) if runs else np.array([])
+            if not values.size:
+                continue
+            colour, marker = style_of(sampler)
+            axis.scatter(index + _jitter(values.size, index), values, s=12, color=colour,
+                         marker=marker, alpha=0.5, edgecolors="white", linewidths=0.5,
+                         zorder=3)
+            median = float(np.median(values))
+            axis.plot([index - 0.3, index + 0.3], [median] * 2, color=colour,
+                      linewidth=2.2, solid_capstyle="round", zorder=4)
+            axis.annotate(f"{median:.2f}", (index + 0.33, median), fontsize=7,
+                          color=INK_SOFT, va="center")
+        axis.axhline(config["success_rmsd"], color=INK_SOFT, linewidth=1, linestyle="--")
+        axis.set_ylim(bottom=0)
+        _category_axis(axis, samplers)
+        _frame(axis, "RMSD to ground truth (A)", f"copy number {copy_number}")
+    _legend(figure, samplers)
+    _finish(pdf, figure)
+
+
+def _table_page(pdf, config, records):
+    """Every run as text: the colour-independent route to all of the data."""
+    figure = plt.figure(figsize=(11, 8.5))
+    figure.suptitle("All runs", fontsize=13, color=INK, y=0.96)
+    header = ["copies", "sampler", "seed", "DOF", "wall s", "CPU s", "frames",
+              "solved at s", "best-model RMSD", "median RMSD", "best IMP score", "note"]
+    rows = []
+    for r in sorted(records, key=lambda r: (r["copy_number"], r["seed"], r["sampler"])):
+        rmsds = r.get("best_rmsds")
+        scores = r.get("best_scores")
+        has = rmsds is not None and len(rmsds)
+        rows.append([
+            str(r["copy_number"]), r["sampler"], str(r["seed"]), str(r.get("n_dof", "-")),
+            _fmt(r["wall_time"]), _fmt(r.get("cpu_time", float("nan"))),
+            str(r.get("n_frames", "-")), _fmt(r.get("time_to_solution", float("nan"))),
+            _fmt(rmsds[0], ".2f") if has else "-",
+            _fmt(float(np.median(rmsds)), ".2f") if has else "-",
+            _fmt(scores[0], ".2f") if has else "-",
+            (r.get("failure") or r.get("note") or "")[:24],
+        ])
+    # One page holds ~40 rows; a longer sweep is split across pages.
+    for start in range(0, max(len(rows), 1), 40):
+        if start:
+            figure = plt.figure(figsize=(11, 8.5))
+            figure.suptitle("All runs (continued)", fontsize=13, color=INK, y=0.96)
+        _table(figure, [0.03, 0.03, 0.94, 0.88], header, rows[start:start + 40],
+               [0.05, 0.1, 0.04, 0.05, 0.06, 0.06, 0.06, 0.08, 0.1, 0.09, 0.09, 0.18])
+        pdf.savefig(figure)
+        plt.close(figure)
 
 
 def write_report(path: str, config: dict, records: Sequence[dict]) -> str:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    # Report-level defaults, so an older results.json still renders.
+    config = {"n_best_models": 50, "burnin_fraction": 0.25, "success_rmsd": 5.0, **config}
     with PdfPages(path) as pdf:
         _summary_page(pdf, config, records)
-        _window_panels(
-            pdf, records, "rmsd", "RMSD to ground truth (A)",
-            "Accuracy: RMSD to the ground-truth structure",
-            "Superposed, structured beads only. Lower is better; the short rule is the median.")
-        _window_panels(
-            pdf, records, "imp_score", "IMP score",
-            "IMP score of the final frames",
-            "Re-evaluated on the CPU by IMP, not the BlackJAX log-posterior. Lower is better.",
-            log=True)
-        _window_panels(
-            pdf, records, "satisfied", "fraction of restraints satisfied",
-            "Restraint satisfaction",
-            f"Within {config.get('satisfaction_tolerance')} A of the target distance. "
-            "Higher is better.")
-        _docking_pages(pdf, records)
-        _scaling_page(pdf, records)
+        _time_to_solution_page(pdf, config, records)
+        _convergence_page(pdf, config, records)
+        _best_models_page(pdf, config, records)
         _table_page(pdf, config, records)
     return path
