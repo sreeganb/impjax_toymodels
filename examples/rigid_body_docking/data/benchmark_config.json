@@ -2,7 +2,7 @@
   "name": "1avx_docking_sweep",
   "system": "docking_system",
   "metrics_module": "docking_metrics",
-  "output_dir": "out/benchmark",
+  "output_dir": "out/benchmark_4res",
   "copy_numbers": [
     1
   ],
@@ -36,7 +36,7 @@
     "per_copy_number": {}
   },
   "restraints": {
-    "top_n": 20,
+    "top_n": 4,
     "top_n_intra": 0,
     "residue_types": "KS",
     "min_seq_sep": 3,
@@ -50,16 +50,16 @@
     "sigma_bead": 1.0
   },
   "sampler_params": {
-    "n_steps": 20000,
-    "burnin": 0,
-    "thin": 1,
-    "n_particles": 128,
-    "n_temperature_steps": 50,
-    "n_mcmc_steps": 20,
-    "schedule": "linear",
+    "n_steps": 30000,
+    "burnin": 100,
+    "thin": 5,
+    "n_particles": 100,
+    "n_temperature_steps": 100,
+    "n_mcmc_steps": 10,
+    "schedule": "geometric",
     "target_ess": 0.6,
-    "imp_rex_frames": 6000,
+    "imp_rex_frames": 60000,
     "imp_rex_mc_steps": 10,
-    "imp_rex_max_temp": 2.5
+    "imp_rex_max_temp": 4.0
   }
 }
