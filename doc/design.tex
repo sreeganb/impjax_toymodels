@@ -709,17 +709,26 @@ untempered prior here -- in SMC's incremental weights. Sampling is therefore
 unaffected; only the absolute number differs, which is why the benchmark
 re-scores frames with IMP on the CPU rather than quoting the log-posterior.
 
-\subsection{Docking-specific accuracy metrics}
+\subsection{Accuracy: RMSD of the best-scoring models}
 
-A global superposed RMSD spreads a docking error across both partners:
-translating the ligand $5$\,\AA{} gives a global RMSD of $1.50$ but a ligand
-RMSD of $5.00$. \texttt{docking\_metrics.py} therefore adds the CAPRI
-measurements -- ligand RMSD (superpose receptor, measure ligand), interface
-RMSD, and \emph{fnat} (fraction of native contacts, needing no superposition
-at all) -- with cutoffs derived from the bead radii rather than copied from
-the all-atom literature ($12$\,\AA{} between bead centres for CAPRI's
-$5$\,\AA{} heavy-atom contact). The global RMSD is cross-checked against
-\texttt{IMP.pmi.analysis.Precision}, agreeing to $1.7\times10^{-6}$\,\AA.
+The ground truth of a toy model is the system itself as built, before the
+shuffle: same representation, same copy number, rigid bodies on their input
+coordinates. Accuracy is one RMSD per model to that structure, after a single
+superposition over every rigid-body bead (\texttt{structure\_rmsd.py}; for
+more than one copy, minimised over relabellings of identical copies). It is
+reported for each run's $50$ best-scoring models: every frame of every RMF3
+file the run wrote -- all replicas for replica exchange, the anneal and the
+final population for SMC -- is re-scored by IMP on the CPU with the full
+scoring function, and the lowest $50$ after a $25\%$ burn-in are kept
+(\texttt{trajectory\_analysis.py}). Judging by best-scoring models asks the
+question modelling asks: are the models one would pick by score correct?
+
+The headline comparison is \emph{time to solution}: the wall time until a
+run's best-scoring model is within $5$\,\AA{} of the ground truth. It folds
+sampling efficiency and hardware into one number -- a GPU shortens it for a
+population sampler directly, while a replica ladder only gains as far as its
+number of MPI ranks allows. Replica exchange runs with one replica per MPI
+rank (\texttt{run\_imp\_rex.py}, launched as \texttt{mpirun -np N}).
 
 \subsection{Two flaws the benchmark exposed}
 
@@ -746,41 +755,9 @@ list of seeds so the result is a distribution rather than an anecdote.
 
 \subsection{Measured comparison}
 
-Five seeds, wall time equalised at ${\sim}6$--$8$\,s per sampler, JAX on the
-CPU backend. ``Docked'' counts seeds whose final-window median RMSD is under
-$5$\,\AA.
-%
-\begin{center}
-\small
-\begin{tabular}{@{}l r r r r r c r r@{}}
-\toprule
-Sampler & s0 & s1 & s2 & s3 & s4 & docked & wall (s) & cpu (s) \\
-\midrule
-\texttt{rmh}          &  1.46 &  1.07 & 16.07 &  1.07 &  1.52 & 4/5 & 6.2 &  8.9 \\
-\texttt{smc}          & 16.10 &  0.91 &  0.93 &  0.94 &  1.01 & 4/5 & 7.9 & 24.3 \\
-\texttt{smc\_tempered}& 16.03 &  0.92 &  0.88 &  0.86 &  0.83 & 4/5 & 7.6 & 25.4 \\
-\texttt{smc\_adaptive}&  1.00 &  1.02 &  1.10 &  1.14 &  1.61 & \textbf{5/5} & 8.3 & 26.3 \\
-\texttt{imp\_rex}     &  1.05 &  9.67 & 17.23 & 17.18 &  1.19 & 2/5 & 7.2 &  7.1 \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-All five reach CAPRI \emph{high} quality on their best frame (sub-\AA ngstrom
-RMSD), so the 20 crosslinks determine the 6 relative degrees of freedom well.
-They differ in \emph{reliability}, not in ceiling: adaptive-tempered SMC
-docked from every start, the fixed-ladder variants and RMH from four, IMP's
-replica exchange from two at comparable wall time. Adapting the ladder to
-hold ESS is doing real work on a multimodal target -- the case a fixed
-schedule cannot cover, since it has no way to notice a collapsed population.
-When replica exchange does find the interface it refines best ($0.36$\,\AA,
-every native contact recovered): its difficulty here is search, not
-refinement. Note also that the SMC variants spend ${\sim}25$\,s of CPU for
-${\sim}8$\,s of wall time, buying reliability with parallel work over the
-population -- the trade a GPU should make cheaper, and the number worth
-re-measuring on one.
-
-These are single-machine CPU-backend numbers on one 14-parameter system, not
-a general claim about the samplers.
+The earlier five-seed table used a final-frame window and CAPRI scores, both
+since replaced by the measurement above; it will be re-measured with MPI
+replica exchange ($8$ replicas) on the lab machine.
 
 \section{Module layout}
 \label{sec:modules}

@@ -83,8 +83,6 @@ from impjax_toymodels.system_info import BuiltSystem
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 
 #: Molecule names, in the fixed order every bead ordering downstream follows.
-#: TRYP first makes it the "receptor" for the CAPRI-style ligand RMSD, which
-#: is the convention for the larger partner.
 PROTEINS = ("TRYP", "STI")
 
 #: Default restraint file, relative to DATA_DIR.

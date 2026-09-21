@@ -10,8 +10,10 @@ examples/
     system_registry.py        --system NAME -> a system module
     generate_contact_map.py
     generate_distance_restraints.py
-    evaluate_recovery.py
     run_sampling_comparison.py
+    run_imp_rex.py            IMP replica exchange, one replica per MPI rank
+    structure_rmsd.py         RMSD to the unshuffled build
+    trajectory_analysis.py    best-scoring models, their RMSD, convergence
     benchmark_pipeline.py / benchmark_report.py
   kcoil_ecoil_system.py     system module: the coiled-coil dimer
   rigid_body_docking/       system module + data: 1AVX trypsin/inhibitor
@@ -167,56 +169,31 @@ restraint count is a controlled variable rather than whatever was left in
 
 | Page | |
 |---|---|
-| Summary | config, JAX backend, case count, and what the numbers do and don't mean |
-| Accuracy | RMSD to ground truth, every frame in the scoring window, per copy number |
-| IMP score | the same frames re-scored by **IMP on the CPU** |
-| Satisfaction | fraction of restraints within tolerance of their target distance |
-| Scaling | degrees of freedom against wall and CPU time |
-| Docking | ligand RMSD, interface RMSD and fnat — only when the config names a `metrics_module` (see `rigid_body_docking/`) |
-| All results | every number as a table |
+| Summary | per sampler: seeds solved, time to solution, best-model and best-50 RMSD, wall/CPU time |
+| Time to solution | wall seconds until the run's best-scoring model is within `success_rmsd` of the ground truth |
+| Score convergence | best IMP score so far against wall time, ground-truth score as the target |
+| Best-scoring models | RMSD of each run's `n_best_models` lowest-scoring models |
+| All runs | every number as a table |
 
-The score pages are **IMP's own score, not the BlackJAX log-posterior.** The
-latter is `-S(theta) + log p0(theta)` — a different quantity, and quoting it
-would make BlackJAX and IMP samplers incomparable. Frames are reloaded into an
-IMP model and rescored, which costs ~0.6 ms/frame, so the window is free.
+**Ground truth** is the system as built, before the shuffle: same
+representation, same copy number, rigid bodies on their input coordinates
+(`structure_rmsd.py`). One superposition over every rigid-body bead gives one
+RMSD per model; flexible beads have no input structure and are left out.
 
-Restraint satisfaction is reported alongside the score because an aggregate
-score can hide two badly violated restraints under a hundred satisfied ones.
-The deviation is recovered from each restraint's own score: the wells are
-`0.5*kappa*(d-d0)^2`, so `|d-d0| = sqrt(2*score/kappa)`.
+**Best-scoring models.** Every frame of every RMF3 file a run wrote (all
+replicas for `imp_rex`; the anneal plus final population for SMC) is
+re-scored by **IMP on the CPU** with the full scoring function — never the
+BlackJAX log-posterior, which is a different quantity — and the
+`n_best_models` lowest after `burnin_fraction` are kept
+(`trajectory_analysis.py`, which also runs standalone on any RMF3 files).
 
-Every point is one frame, never a mean — for a sampler that returns an
-ensemble the spread *is* the result, and averaging it away hides the
-difference between a converged run and a wandering one.
+**Replica exchange** runs `imp_rex_replicas` replicas under
+`imp_rex_launcher` (`mpirun -np N python harness/run_imp_rex.py ...`); load
+your MPI/IMP modules first. With 1 replica it runs in-process.
 
 Colour identifies the sampler in a fixed order and is stable across every
-page. The hues are the first five slots of a palette validated for
-colour-vision deficiency (worst adjacent CVD dE 9.1, normal-vision dE 19.6,
-against targets of 8 and 15); three sit below 3:1 contrast on white, so every
-sampler is also named on the axis or directly labelled, carries its own marker
-shape, and the whole sweep is reproduced as a table.
-
-## Did it recover the ground truth?
-
-`harness/evaluate_recovery.py` answers that directly, by walking an RMF3 trajectory
-and reporting the RMSD to the reference structure after optimal superposition
-(superposed, because every restraint is a function of internal geometry only,
-so the recovered assembly is free to sit anywhere in space):
-
-```bash
-python harness/evaluate_recovery.py out/kcoil_ecoil_smc_adaptive.rmf3
-python harness/evaluate_recovery.py out/*.rmf3 --copy-number 2
-```
-
-Only the structured beads are scored: the linker is genuinely flexible and has
-no reference conformation to be right or wrong about. With more than one copy
-each copy is scored separately against the single reference dimer and the
-worst is reported — the restraint file ties copy i to copy i and says nothing
-across copies, so the copies are free to land anywhere relative to each other.
-
-`build_kcoil_ecoil_system(copy_number=1, shuffle=False)` gives you the
-reference state directly, if you want to check that the ground truth really is
-the score minimum.
+page (a CVD-validated palette); every sampler also has its own marker shape
+and is named in the legend and the tables.
 
 ## Running the samplers
 

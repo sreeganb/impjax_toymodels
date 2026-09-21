@@ -32,7 +32,7 @@ CONSTRAINT_FILE = os.path.join(EXAMPLES_DIR, "data", "distance_constraints.csv")
 #: Residue range represented by flexible beads, i.e. with no reference position.
 LINKER = (22, 31)
 
-import evaluate_recovery  # noqa: E402
+import structure_rmsd  # noqa: E402
 import kcoil_ecoil_system  # noqa: E402
 
 from impjax_toymodels import distance_restraints as dr  # noqa: E402
@@ -180,34 +180,42 @@ class GroundTruthRecoveryTests(unittest.TestCase):
         self.assertEqual(count_three, 3 * count_one)
 
     def test_reference_state_has_zero_rmsd_to_itself(self):
-        # Closes the loop between the two halves of the setup: the state the
-        # restraints were measured in is the same state evaluate_recovery.py
-        # compares sampled models against.  If these ever drift apart, every
-        # reported RMSD is offset by a constant and nobody notices.
-        reference = evaluate_recovery.reference_coordinates(EXAMPLES_DIR)
-        self.assertGreater(len(reference), 0)
+        # The ground truth is the unshuffled build; rebuilding it must give
+        # back the same coordinates, or every reported RMSD carries an offset.
+        first = structure_rmsd.build_reference(kcoil_ecoil_system, 1, False)
+        second = structure_rmsd.build_reference(kcoil_ecoil_system, 1, False)
+        self.assertGreater(first.coordinates.shape[1], 0)
         self.assertAlmostEqual(
-            evaluate_recovery.superposed_rmsd(reference, reference), 0.0, places=6)
+            structure_rmsd.rmsd_to_reference(second.coordinates, first.coordinates), 0.0, places=6)
 
-    def test_superposed_rmsd_ignores_rigid_motion_but_not_reflection(self):
+    def test_kabsch_rmsd_ignores_rigid_motion_but_not_reflection(self):
         rng = np.random.default_rng(0)
         points = rng.normal(size=(40, 3)) * 10.0
         rotation, _ = np.linalg.qr(rng.normal(size=(3, 3)))
         if np.linalg.det(rotation) < 0:
             rotation[:, 0] *= -1.0
         moved = (rotation @ points.T).T + np.array([100.0, -50.0, 7.0])
-        self.assertAlmostEqual(
-            evaluate_recovery.superposed_rmsd(moved, points), 0.0, places=6)
+        self.assertAlmostEqual(structure_rmsd.kabsch_rmsd(moved, points), 0.0, places=6)
         # A mirror image is a different structure and must not score as a match.
         mirrored = points * np.array([1.0, 1.0, -1.0])
-        self.assertGreater(evaluate_recovery.superposed_rmsd(mirrored, points), 1.0)
+        self.assertGreater(structure_rmsd.kabsch_rmsd(mirrored, points), 1.0)
 
-    def test_recovery_rmsd_covers_structured_beads_only(self):
+    def test_rmsd_is_invariant_to_relabelling_identical_copies(self):
+        # Copies of one protein are interchangeable, so a model whose copy 0
+        # sits where the reference's copy 1 does is still a perfect model.
+        rng = np.random.default_rng(1)
+        reference = rng.normal(size=(2, 15, 3)) * 10.0
+        swapped = reference[::-1].copy()
+        self.assertAlmostEqual(
+            structure_rmsd.rmsd_to_reference(swapped, reference), 0.0, places=6)
+
+    def test_rmsd_covers_rigid_body_beads_only(self):
         # The linker is genuinely flexible and has no reference conformation,
         # so scoring it would add noise to the RMSD without adding meaning.
         built, _, _ = kcoil_ecoil_system.build_kcoil_ecoil_system(
-            copy_number=1, shuffle=False)
-        scored = len(evaluate_recovery.bead_coordinates(built.root_hier, copy_index=0))
+            copy_number=1, shuffle=False, distance_csv=False)
+        scored = structure_rmsd.copy_coordinates(
+            built.root_hier, kcoil_ecoil_system.PROTEINS, 1).shape[1]
         everything = len(IMP.atom.Selection(
             built.root_hier, resolution=1).get_selected_particles())
         self.assertGreater(scored, 0)

@@ -6,10 +6,9 @@ flexible beads, and nothing connecting them — a genuine protein–protein
 docking search rather than the linker-refinement question the KCOIL/ECOIL
 example asks.
 
-Everything in `harness/` is shared and system-agnostic. Only two files here
-know what the molecules are: `docking_system.py` (how to build it) and
-`docking_metrics.py` (how to score a docking model). Adding a third system
-means writing those two and a config, not forking the harness.
+Everything in `harness/` is shared and system-agnostic. Only one file here
+knows what the molecules are: `docking_system.py` (how to build it). Adding a
+third system means writing that and a config, not forking the harness.
 
 | | |
 |---|---|
@@ -147,44 +146,22 @@ expansion map.
 
 ## Measuring accuracy
 
-`harness/evaluate_recovery.py` gives the global superposed RMSD over every
-structured bead, which keeps this comparable with the KCOIL/ECOIL report. On
-its own it is the wrong primary question for docking: a global superposition
-spreads the error across both partners. Translating the ligand 5 Å gives a
-global RMSD of **1.50** but a ligand RMSD of **5.00**.
+One number: the RMSD of a model to **the system as built, before the
+shuffle** — the same resolution-2 beads, both rigid bodies on their crystal
+coordinates — after one superposition over every bead
+(`harness/structure_rmsd.py`). Nothing docking-specific.
 
-`docking_metrics.py` adds the three measurements the field actually uses:
+It is measured on each run's **50 best-scoring models** (IMP score, CPU,
+after a 25% burn-in), pooled across all of the run's RMF3 files — every
+replica for `imp_rex`, the final particle population plus the anneal for the
+SMC variants. `harness/trajectory_analysis.py` does this and also runs
+standalone on any RMF3 files, e.g. a replica-exchange run done by hand:
 
-| | |
-|---|---|
-| **L-RMSD** | superpose the receptor, measure the ligand — all the error lands on the relative placement |
-| **I-RMSD** | interface beads only; insensitive to the lever arm that inflates L-RMSD when a distant part of the ligand swings |
-| **fnat** | fraction of native contacts recovered; needs no superposition at all |
-| **CAPRI class** | high / medium / acceptable / incorrect |
-
-Cutoffs are derived from this representation rather than copied from the
-literature. CAPRI defines contacts between heavy atoms at 5 Å; a resolution-2
-bead has a mean radius of 3.6 Å, so bead-centre distances run about two mean
-radii longer, putting the equivalent cutoff near **12 Å**. At that cutoff the
-crystal pose has 74 native bead contacts across 47 interface beads. The CAPRI
-class is an *indication* only — the published thresholds were calibrated on
-all-atom RMSDs, and a coarse-grained model cannot be held to a 1 Å criterion.
-
-### On PMI_analysis
-
-`PMI_analysis/pyext/src/accuracy.py` is a wrapper over
-`IMP.pmi.analysis.Precision.get_rmsd_wrt_reference_structure_with_alignment`,
-and it needs `cluster.N.sample_A/B.txt` files produced by the full
-`run_analysis_trajectories → extract_models → run_clustering` workflow, which
-is built around replica-exchange output directories rather than the RMF3
-trajectories the BlackJAX samplers write. (Its own `example/get_accuracy.py`
-also calls `AccuracyModels` with keyword arguments that no longer match the
-class.)
-
-So the underlying primitive is used directly instead of the pipeline around
-it. `test/test_docking_metrics.py` writes real RMF3 files and asserts our
-Kabsch RMSD matches `IMP.pmi.analysis.Precision` — measured agreement
-**1.7e-6 Å** on shuffled frames ~30 Å from the reference.
+```bash
+python ../harness/trajectory_analysis.py --system docking_system \
+    --distance-csv out/benchmark_4res/n1/distance_constraints.csv \
+    out/benchmark_4res/n1/n1_s0_imp_rex/rmfs/*.rmf3
+```
 
 ## The benchmark
 
@@ -194,10 +171,20 @@ python ../harness/benchmark_pipeline.py --config data/benchmark_config.json --sk
 ```
 
 All five samplers on the same system and the same scoring function: BlackJAX
-RMH, three SMC variants, and IMP's own replica exchange as the baseline. The
-report adds three docking pages (L-RMSD, I-RMSD, fnat) to the standard ones,
-driven by the config's `metrics_module` key; a system without one gets the
-standard report unchanged.
+RMH, three SMC variants, and IMP's own replica exchange as the baseline.
+
+**Replica exchange runs under MPI.** The config sets `"imp_rex_replicas": 8`,
+so the pipeline launches
+
+```bash
+mpirun -np 8 python harness/run_imp_rex.py ... &> <case>_imp_rex.out
+```
+
+once per seed (one replica per rank, `rmfs/<replica>.rmf3` each). Load your
+MPI-enabled IMP and OpenMPI modules before starting the sweep; the launcher
+inherits the environment. `"imp_rex_launcher"` takes extra flags, e.g.
+`"mpirun --oversubscribe"`. Set `"imp_rex_replicas": 1` to run it in-process
+with no MPI (a laptop smoke test — not a fair replica-exchange baseline).
 
 ### Seeds are not optional here
 
@@ -215,49 +202,15 @@ previously meant each got a *different* random start.
 
 ## Results
 
-Measured on this machine (JAX on CPU), 5 seeds, wall time equalised at
-~6–8 s per sampler — `imp_rex` is at 6000 frames for that reason; at 2000 it
-finished in 3 s and any reliability claim would have been unfair.
+The previous results table here was measured with the old metrics (a final
+frame window and CAPRI scores) and has been removed. Re-run the sweep on the
+lab machine to produce the report, whose pages are:
 
-Final-window median RMSD to the crystal structure, per seed:
-
-| sampler | s0 | s1 | s2 | s3 | s4 | docked | wall s | cpu s |
-|---|---:|---:|---:|---:|---:|:---:|---:|---:|
-| `rmh`          |  1.46 |  1.07 | 16.07 |  1.07 |  1.52 | 4/5 | 6.2 |  8.9 |
-| `smc`          | 16.10 |  0.91 |  0.93 |  0.94 |  1.01 | 4/5 | 7.9 | 24.3 |
-| `smc_tempered` | 16.03 |  0.92 |  0.88 |  0.86 |  0.83 | 4/5 | 7.6 | 25.4 |
-| `smc_adaptive` |  1.00 |  1.02 |  1.10 |  1.14 |  1.61 | **5/5** | 8.3 | 26.3 |
-| `imp_rex`      |  1.05 |  9.67 | 17.23 | 17.18 |  1.19 | 2/5 | 7.2 |  7.1 |
-
-Best frame found across all seeds:
-
-| sampler | RMSD | L-RMSD | I-RMSD | fnat | CAPRI |
-|---|---:|---:|---:|---:|:---:|
-| `rmh`          | 0.57 | 1.05 | 0.47 | 0.91 | high |
-| `smc`          | 0.65 | 1.37 | 0.54 | 0.76 | high |
-| `smc_tempered` | 0.66 | 1.42 | 0.53 | 0.77 | high |
-| `smc_adaptive` | 0.67 | 1.29 | 0.56 | 0.84 | high |
-| `imp_rex`      | 0.36 | 1.08 | 0.31 | 1.00 | high |
-
-Read together these say something the aggregate score alone would not:
-
-* **Every sampler can solve this problem.** All five reach CAPRI *high*
-  quality on their best frame, sub-ångström in RMSD. The 20 synthetic
-  crosslinks determine the 6 relative degrees of freedom well.
-* **They differ in reliability, not in ceiling.** Adaptive-tempered SMC
-  docked from all five starts; RMH and the fixed-ladder SMC variants from
-  four; IMP's replica exchange from two, at comparable wall time. Adapting
-  the temperature ladder to hold ESS is doing real work on a multimodal
-  target — which is the case the fixed ladder was never going to cover, since
-  its schedule cannot notice that the population has collapsed.
-* **When replica exchange does find the interface it refines best** (0.36 Å,
-  every native contact recovered) — unsurprising for a well-tuned MC with
-  adaptive movers. Its problem here is search, not refinement.
-* **Wall time hides a large CPU-time difference.** The SMC variants use
-  ~25 s of CPU for ~8 s of wall time; RMH uses 8.9 s and replica exchange
-  7.1 s. The SMC population vectorises, so it is buying reliability with
-  parallel work — which is exactly the trade a GPU should make cheaper, and
-  the number to re-measure on one.
-
-These are single-machine, CPU-backend numbers on one 14-parameter system, not
-a general claim about the samplers.
+1. **Summary** — per sampler: seeds solved, median time to solution, RMSD of
+   the best-scoring model and of the 50 best, wall and CPU time.
+2. **Time to solution** — wall seconds until the run's best-scoring model is
+   within `success_rmsd` (5 Å) of the ground truth, one point per seed.
+3. **Score convergence** — best IMP score so far against wall time, with the
+   ground truth's own score as the target line.
+4. **RMSD of the 50 best-scoring models**, seeds pooled.
+5. **All runs** as a table.
