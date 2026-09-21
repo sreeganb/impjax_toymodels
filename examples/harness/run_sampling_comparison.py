@@ -19,10 +19,12 @@ Five samplers are available, chosen with --samplers (any combination):
                   needs rather than a fixed count.
     imp_rex       IMP's own native replica-exchange Monte Carlo
                   (IMP.pmi.macros.ReplicaExchange), on the exact same system
-                  and scoring function, as the ground-truth baseline.
+                  and scoring function, as the baseline. --imp-rex-replicas N
+                  runs N replicas under MPI (see run_imp_rex.py).
 
-All three SMC variants write only the best-scoring particle per temperature
-step to RMF3.
+All three SMC variants write the best-scoring particle per temperature step
+to <run>_<sampler>.rmf3 (the anneal's progress) and the whole final
+population to <run>_<sampler>_population.rmf3 (the posterior sample).
 
 --prior selects the prior p0(theta). It matters most for the SMC variants,
 whose lambda = 0 distribution *is* the prior:
@@ -61,7 +63,8 @@ Usage
 
 Outputs, under --output-dir, named by --run-name (default "kcoil_ecoil"):
     <run-name>_<sampler>.rmf3 / _stats.csv  per BlackJAX sampler selected
-    <run-name>_imp_rex/                     (if "imp_rex" selected; IMP's own output dir)
+    <run-name>_<smc*>_population.rmf3       final SMC population, per SMC variant
+    <run-name>_imp_rex/rmfs/<replica>.rmf3  (if "imp_rex" selected; one per replica)
     <run-name>.log                          all samplers share one run log
     <run-name>_score_comparison.csv         if --debug is set (BlackJAX samplers only)
 """
@@ -70,13 +73,13 @@ import argparse
 import os
 
 import IMP
-import IMP.pmi.macros
-import IMP.pmi.restraints.basic
 import jax
 
+import run_imp_rex
 import system_registry
 
 from impjax_toymodels import elapsed_timing, logging_config, priors, start_timing, wrapper_impjax
+from impjax_toymodels.timing import TimingSnapshot
 
 SAMPLER_CHOICES = ("rmh", "smc", "smc_tempered", "smc_adaptive", "imp_rex")
 PRIOR_CHOICES = ("flat", "box", "split", "split+box")
@@ -199,6 +202,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imp-rex-frames", type=int, default=2000)
     parser.add_argument("--imp-rex-mc-steps", type=int, default=5, help="MC steps per replica-exchange frame")
     parser.add_argument("--imp-rex-max-temp", type=float, default=4.0)
+    parser.add_argument("--imp-rex-replicas", type=int, default=1,
+                        help="replicas, one per MPI rank; > 1 launches run_imp_rex.py under "
+                             "--imp-rex-launcher (load your MPI/IMP modules first)")
+    parser.add_argument("--imp-rex-launcher", default="mpirun",
+                        help='MPI launcher, e.g. "mpirun" or "mpirun --oversubscribe"')
 
     parser.add_argument("--debug", action="store_true", help="verify JAX vs CPU-IMP scores (rmh/smc only)")
     parser.add_argument("--distance-csv", default=None,
@@ -258,6 +266,7 @@ def _run_blackjax_smc(sampler: str, args, out_prefix: str, log_path: str):
         sigma_bead=args.sigma_bead,
         prior=prior,
         rmf_path=f"{out_prefix}_{sampler}.rmf3",
+        population_rmf_path=f"{out_prefix}_{sampler}_population.rmf3",
         log_path=log_path,
         debug=args.debug,
         verbose=not args.quiet,
@@ -267,47 +276,22 @@ def _run_blackjax_smc(sampler: str, args, out_prefix: str, log_path: str):
 
 
 def _run_imp_replica_exchange(args, out_prefix: str, run_logger):
-    """IMP's own native sampler (ground-truth-implementation baseline), on a
-    freshly built copy of the exact same system and scoring function.
+    """IMP's own replica-exchange Monte Carlo, on the exact same system.
 
-    Always uses the *combined* scoring function: IMP has no notion of a
-    tempered likelihood versus an untempered prior, so a --prior split would
-    not be a like-for-like baseline.
+    Delegated to run_imp_rex.launch: with --imp-rex-replicas N > 1 it runs
+    `<launcher> -np N python run_imp_rex.py ...` (one replica per MPI rank,
+    each writing <out_prefix>_imp_rex/rmfs/<replica>.rmf3); with one replica
+    it runs in-process. Wall time is the slowest replica's sampling time, CPU
+    time the sum over replicas.
     """
-    system = system_registry.resolve(getattr(args, "system", None))
-    seed_imp(args)
-    built, score_function, output_objects = system.build_system(
-        copy_number=args.copy_number, distance_csv=getattr(args, "distance_csv", None))
     output_dir = f"{out_prefix}_imp_rex"
-
-    timer = start_timing()
-    rex = IMP.pmi.macros.ReplicaExchange(
-        built.model,
-        root_hier=built.root_hier,
-        monte_carlo_sample_objects=built.dof.get_movers(),
-        replica_exchange_maximum_temperature=args.imp_rex_max_temp,
-        global_output_directory=output_dir,
-        output_objects=output_objects,
-        nframes_write_coordinates=1,
-        monte_carlo_steps=args.imp_rex_mc_steps,
-        number_of_frames=args.imp_rex_frames,
-        number_of_best_scoring_models=1,
-    )
-    rex.execute_macro()
-    elapsed = elapsed_timing(timer)
-
-    final_score = score_function.evaluate(False)
+    timing = run_imp_rex.launch(args, output_dir)
+    elapsed = TimingSnapshot(wall_time=timing["wall_time"], cpu_time=timing["cpu_time"])
     run_logger.info(
-        "imp_rex finished: %d frames x %d MC steps in %.2fs wall / %.2fs cpu, "
-        "final-frame IMP score=%.2f, output=%s",
-        args.imp_rex_frames,
-        args.imp_rex_mc_steps,
-        elapsed.wall_time,
-        elapsed.cpu_time,
-        final_score,
-        output_dir,
-    )
-    return elapsed, float(final_score), f"frames={args.imp_rex_frames}"
+        "imp_rex finished: %d replicas x %d frames x %d MC steps in %.2fs wall / %.2fs cpu, "
+        "output=%s", timing["replicas"], args.imp_rex_frames, args.imp_rex_mc_steps,
+        elapsed.wall_time, elapsed.cpu_time, output_dir)
+    return elapsed, float("nan"), f"replicas={timing['replicas']} frames={args.imp_rex_frames}"
 
 
 RUNNERS = {
