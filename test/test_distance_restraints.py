@@ -180,46 +180,18 @@ class GroundTruthRecoveryTests(unittest.TestCase):
         self.assertEqual(count_three, 3 * count_one)
 
     def test_reference_state_has_zero_rmsd_to_itself(self):
-        # The ground truth is the unshuffled build; rebuilding it must give
-        # back the same coordinates, or every reported RMSD carries an offset.
-        first = structure_rmsd.build_reference(kcoil_ecoil_system, 1, False)
-        second = structure_rmsd.build_reference(kcoil_ecoil_system, 1, False)
-        self.assertGreater(first.coordinates.shape[1], 0)
-        self.assertAlmostEqual(
-            structure_rmsd.rmsd_to_reference(second.coordinates, first.coordinates), 0.0, places=6)
+        # The ground truth is the unshuffled build; measured against itself it
+        # must be 0, or every reported RMSD carries an offset. This also
+        # exercises the PMI Precision path end to end (structure_rmsd.py).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reference = structure_rmsd.write_reference(
+                kcoil_ecoil_system, 1, False, os.path.join(tmpdir, "reference.rmf3"))
+            measure = structure_rmsd.RmsdToReference(
+                reference, kcoil_ecoil_system.PROTEINS)
+            values = measure.rmsd_for(reference.rmf_path, [0])
+            self.assertEqual(len(values), 1)
+            self.assertAlmostEqual(float(values[0]), 0.0, places=5)
 
-    def test_kabsch_rmsd_ignores_rigid_motion_but_not_reflection(self):
-        rng = np.random.default_rng(0)
-        points = rng.normal(size=(40, 3)) * 10.0
-        rotation, _ = np.linalg.qr(rng.normal(size=(3, 3)))
-        if np.linalg.det(rotation) < 0:
-            rotation[:, 0] *= -1.0
-        moved = (rotation @ points.T).T + np.array([100.0, -50.0, 7.0])
-        self.assertAlmostEqual(structure_rmsd.kabsch_rmsd(moved, points), 0.0, places=6)
-        # A mirror image is a different structure and must not score as a match.
-        mirrored = points * np.array([1.0, 1.0, -1.0])
-        self.assertGreater(structure_rmsd.kabsch_rmsd(mirrored, points), 1.0)
-
-    def test_rmsd_is_invariant_to_relabelling_identical_copies(self):
-        # Copies of one protein are interchangeable, so a model whose copy 0
-        # sits where the reference's copy 1 does is still a perfect model.
-        rng = np.random.default_rng(1)
-        reference = rng.normal(size=(2, 15, 3)) * 10.0
-        swapped = reference[::-1].copy()
-        self.assertAlmostEqual(
-            structure_rmsd.rmsd_to_reference(swapped, reference), 0.0, places=6)
-
-    def test_rmsd_covers_rigid_body_beads_only(self):
-        # The linker is genuinely flexible and has no reference conformation,
-        # so scoring it would add noise to the RMSD without adding meaning.
-        built, _, _ = kcoil_ecoil_system.build_kcoil_ecoil_system(
-            copy_number=1, shuffle=False, distance_csv=False)
-        scored = structure_rmsd.copy_coordinates(
-            built.root_hier, kcoil_ecoil_system.PROTEINS, 1).shape[1]
-        everything = len(IMP.atom.Selection(
-            built.root_hier, resolution=1).get_selected_particles())
-        self.assertGreater(scored, 0)
-        self.assertLess(scored, everything)
 
     def test_split_builder_scores_distance_restraints_as_likelihood(self):
         # Regression guard: these restraints used to be added to the IMP model

@@ -11,8 +11,14 @@ for every sampler:
    pool. (A file of independent samples -- an SMC final population -- has no
    burn-in and is pooled whole.)
 3. The `n_best` lowest-scoring frames across all of the run's files are kept,
-   and only for those is the RMSD to the ground truth computed and stored
-   (structure_rmsd.py). Nothing else is held per frame.
+   and only for those is the RMSD to the ground truth measured and stored.
+   Nothing else is held per frame.
+
+The RMSD is IMP's own -- `IMP.pmi.analysis.Precision`, the primitive
+PMI_analysis's accuracy.py uses (see structure_rmsd.py) -- and is measured in
+a second pass, one batched call per file, over just the frames that get
+reported: the `n_best` pool plus the frames that improved a file's best score
+(those carry the convergence trace).
 
 Judging a run by its best-scoring models, rather than by its last N frames,
 asks the question modelling actually asks: when you pick models by score --
@@ -97,11 +103,52 @@ def _global_trace(events: List[tuple]):
     return times, scores, rmsds
 
 
+def _score_frames(score_function, built, trajectory: TrajectoryFile,
+                  n_best: int, burnin_fraction: float, pool: List[tuple]):
+    """Pass one over one file: score every frame, decide which ones matter.
+
+    No RMSD is computed here. Only two kinds of frame are worth measuring
+    later: one that improves this file's best score (those make the
+    convergence trace) and one that belongs in the run's `n_best` pool. The
+    pool is a max-heap keyed on score, so a frame enters it in O(log n).
+
+    Returns (n_frames, improvements), where `improvements` is a list of
+    (frame, score) in file order.
+    """
+    handle = RMF.open_rmf_file_read_only(trajectory.path)
+    IMP.rmf.link_hierarchies(handle, [built.root_hier])
+    n_frames = handle.get_number_of_frames()
+    first_pooled = int(n_frames * burnin_fraction) if trajectory.has_burnin else 0
+
+    improvements: List[tuple] = []
+    file_best = math.inf
+    for frame in range(n_frames):
+        IMP.rmf.load_frame(handle, RMF.FrameID(frame))
+        score = float(score_function.evaluate(False))
+        if score < file_best:
+            file_best = score
+            improvements.append((frame, score))
+        if frame >= first_pooled and (len(pool) < n_best or score < -pool[0][0]):
+            entry = (-score, trajectory.path, frame)
+            if len(pool) < n_best:
+                heapq.heappush(pool, entry)
+            else:
+                heapq.heapreplace(pool, entry)
+    del handle  # closes the file before the next one is linked
+    return n_frames, improvements
+
+
 def analyse_run(system, files: Sequence[TrajectoryFile], copy_number: int,
                 distance_csv, reference: structure_rmsd.Reference,
                 n_best: int = 50, burnin_fraction: float = 0.25,
                 success_rmsd: float = 5.0) -> dict:
     """Best-scoring models, their RMSDs and the score-convergence trace.
+
+    Two passes. The first scores every frame with IMP and picks out the frames
+    worth measuring; the second measures those, one batched
+    `IMP.pmi.analysis.Precision` call per file (structure_rmsd.py). Scoring is
+    cheap (~1 ms/frame) and must see everything; the RMSD is the expensive
+    part and only ever runs on the handful of frames that are reported.
 
     Returns a dict with:
         n_frames          frames scored, across all files
@@ -115,45 +162,34 @@ def analyse_run(system, files: Sequence[TrajectoryFile], copy_number: int,
     """
     built, score_function, _ = system.build_system(
         copy_number=copy_number, distance_csv=distance_csv)
+    measure = structure_rmsd.RmsdToReference(reference, system.PROTEINS)
 
-    def current_rmsd() -> float:
-        return structure_rmsd.rmsd_to_reference(
-            structure_rmsd.copy_coordinates(built.root_hier, system.PROTEINS, copy_number),
-            reference.coordinates)
-
-    # Max-heap of the n_best lowest scores: entries are (-score, tiebreak, rmsd).
+    present = [t for t in files if os.path.exists(t.path)]
     pool: List[tuple] = []
-    events: List[tuple] = []
+    scanned = {}
     n_scored = 0
-    for trajectory in files:
-        if not os.path.exists(trajectory.path):
-            continue
-        handle = RMF.open_rmf_file_read_only(trajectory.path)
-        IMP.rmf.link_hierarchies(handle, [built.root_hier])
-        n_frames = handle.get_number_of_frames()
-        first_pooled = int(n_frames * burnin_fraction) if trajectory.has_burnin else 0
-        file_best = math.inf
-        for frame in range(n_frames):
-            IMP.rmf.load_frame(handle, RMF.FrameID(frame))
-            score = float(score_function.evaluate(False))
-            n_scored += 1
-            improves = score < file_best
-            enters = frame >= first_pooled and (len(pool) < n_best or score < -pool[0][0])
-            if not (improves or enters):
-                continue  # the common case: no RMSD needed for this frame
-            rmsd = current_rmsd()
-            if improves:
-                file_best = score
-                events.append((trajectory.time_of(frame, n_frames), score, rmsd))
-            if enters:
-                entry = (-score, n_scored, rmsd)
-                if len(pool) < n_best:
-                    heapq.heappush(pool, entry)
-                else:
-                    heapq.heapreplace(pool, entry)
-        del handle  # closes the file before the next one is linked
+    for trajectory in present:
+        n_frames, improvements = _score_frames(
+            score_function, built, trajectory, n_best, burnin_fraction, pool)
+        scanned[trajectory.path] = (trajectory, n_frames, improvements)
+        n_scored += n_frames
 
-    best = sorted((-neg_score, rmsd) for neg_score, _, rmsd in pool)
+    # Pass two: every frame needing an RMSD, measured one file at a time.
+    wanted = {path: {frame for frame, _ in improvements}
+              for path, (_, _, improvements) in scanned.items()}
+    for _, path, frame in pool:
+        wanted.setdefault(path, set()).add(frame)
+    rmsds = {}
+    for path, frames in wanted.items():
+        frames = sorted(frames)
+        for frame, value in zip(frames, measure.rmsd_for(path, frames)):
+            rmsds[(path, frame)] = float(value)
+
+    events = [(trajectory.time_of(frame, n_frames), score, rmsds[(path, frame)])
+              for path, (trajectory, n_frames, improvements) in scanned.items()
+              for frame, score in improvements]
+    best = sorted((-neg_score, rmsds[(path, frame)])
+                  for neg_score, path, frame in pool)
     trace_time, trace_score, trace_rmsd = _global_trace(events)
     solved = [t for t, r in zip(trace_time, trace_rmsd) if r <= success_rmsd]
     return {
@@ -176,10 +212,13 @@ def main(argv=None) -> int:
                         help="restraint file the run used (default: the system's own)")
     parser.add_argument("--n-best", type=int, default=50)
     parser.add_argument("--burnin-fraction", type=float, default=0.25)
+    parser.add_argument("--reference-rmf", default="reference.rmf3",
+                        help="where to write the ground truth (the unshuffled build)")
     args = parser.parse_args(argv)
 
     system = system_registry.resolve(args.system)
-    reference = structure_rmsd.build_reference(system, args.copy_number, args.distance_csv)
+    reference = structure_rmsd.write_reference(
+        system, args.copy_number, args.distance_csv, args.reference_rmf)
     result = analyse_run(
         system, [TrajectoryFile(path, 0.0, 1.0) for path in args.rmf], args.copy_number,
         args.distance_csv, reference, args.n_best, args.burnin_fraction)

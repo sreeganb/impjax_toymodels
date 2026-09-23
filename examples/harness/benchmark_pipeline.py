@@ -14,8 +14,10 @@ sampler, from the RMF3 files each run wrote):
 * **RMSD of the best-scoring models.** Every frame is re-scored by IMP on the
   CPU with the full scoring function, the `n_best_models` lowest-scoring
   frames after `burnin_fraction` are kept, and their RMSD to the ground truth
-  -- the system as built, before the shuffle (structure_rmsd.py) -- is
-  reported. Samplers are judged on the models you would actually pick.
+  -- the system as built, before the shuffle -- is reported. The RMSD is
+  IMP's own `IMP.pmi.analysis.Precision`, the same primitive PMI_analysis's
+  accuracy.py uses (structure_rmsd.py). Samplers are judged on the models you
+  would actually pick.
 * **Score convergence**: the best IMP score found so far against wall-clock
   time.
 * **Time to solution**: wall seconds until the run's best-scoring model is
@@ -117,7 +119,7 @@ def ground_truth_for(config: dict, copy_number: int) -> dict:
     """Resolve which structure and contact map the *restraints* come from.
 
     Only restraint generation reads this. The RMSD reference is always the
-    unshuffled build of the system itself (structure_rmsd.build_reference).
+    unshuffled build of the system itself (structure_rmsd.write_reference).
 
     `per_copy_number` lets a real N-copy prediction override the default, and
     is the path the AF3-per-copy-number workflow takes. Without an override
@@ -243,9 +245,12 @@ def run_sweep(config: dict, out_root: str) -> List[dict]:
         case_dir = os.path.join(out_root, f"n{copy_number}")
         os.makedirs(case_dir, exist_ok=True)
         distance_csv = prepare_restraints(config, copy_number, case_dir)
-        # Ground truth = this system, as built, before the shuffle.
-        reference = structure_rmsd.build_reference(
-            config["_system"], copy_number, distance_csv)
+        # Ground truth = this system, as built, before the shuffle, written
+        # out as a one-frame RMF3 so IMP's own Precision can measure against
+        # it (and so it can be opened in Chimera beside any model).
+        reference = structure_rmsd.write_reference(
+            config["_system"], copy_number, distance_csv,
+            os.path.join(case_dir, "reference.rmf3"))
         size = system_size(config["_system"], copy_number, distance_csv)
         print(f"\n=== copy_number={copy_number}: {size['n_dof']} DOF, "
               f"{size['n_restraints']} restraints, ground-truth IMP score "

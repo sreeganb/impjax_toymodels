@@ -5,114 +5,111 @@ ground truth is therefore not an external PDB at some other resolution -- it
 is *the system itself, as built, before the shuffle*: the same coarse-grained
 representation, the same beads, the same copy number, every rigid body sitting
 on its input coordinates. That is `system.build_system(..., shuffle=False)`,
-and it is the only reference this harness uses.
+written out as a one-frame RMF3 so it can be compared against, and looked at,
+like any other model.
 
-One number per model
---------------------
-The RMSD is taken over every rigid-body bead in the whole system at once,
-after a single optimal superposition (Kabsch, reflection-safe). Superposing is
-required because nothing in the scoring function fixes the global frame --
-every restraint is a function of internal distances -- so an un-superposed
-RMSD would measure that irrelevant freedom instead of the structure.
+The RMSD itself is IMP's, not ours
+----------------------------------
+The measurement is `IMP.pmi.analysis.Precision`:
 
-Flexible beads are left out: PMI builds them on a placeholder position with no
-structure behind it, so the unshuffled build has no "right answer" for them.
+    pr = Precision(model, resolution=1, selection_dictionary={"selection": [...]})
+    pr.add_structures(...); pr.set_reference_structure(reference_rmf, 0)
+    pr.get_rmsd_wrt_reference_structure_with_alignment("set0", "selection")
 
-Identical copies are interchangeable. With copy_number > 1, which copy of a
-protein ended up where the reference's copy 0 sits is arbitrary, so the RMSD
-is minimised over relabellings of the copies (all proteins relabelled
-together, since restraints tie copy i of one protein to copy i of another).
-That is n! superpositions -- trivial for the handful of copies a toy model has,
-and skipped above MAX_PERMUTED_COPIES.
+which is exactly the call PMI_analysis's `accuracy.py::AccuracyModels` makes,
+so this harness and the lab's standard analysis report the same quantity. It
+aligns each model onto the reference over the selection and then takes the
+RMSD; alignment is required because every restraint here is a function of
+internal geometry only, so the assembly is free to sit anywhere in space.
+`IMP.pmi.analysis.Alignment` also permutes identical copies, which is what
+makes the number meaningful when copy_number > 1: which copy landed where is
+arbitrary.
+
+(The hand-written Kabsch version this replaced agreed with it to 1.5e-6 A on
+real trajectory frames -- the change is about using the lab's own primitive,
+not about a correction.)
+
+Resolution 1 selects every bead of the representation, flexible beads
+included. For a system with unstructured regions those beads sit on a PMI
+placeholder in the reference and have no meaningful target, so give
+`selection` only the molecules whose positions the ground truth defines.
 """
 
-import itertools
+import contextlib
+import os
 from dataclasses import dataclass
+from typing import Sequence
 
 import numpy as np
 
 import IMP
-import IMP.atom
-import IMP.core
-
-#: Above this many copies the n! relabellings are no longer tried; the model
-#: is compared copy-for-copy in build order instead.
-MAX_PERMUTED_COPIES = 5
+import IMP.pmi.analysis
+import IMP.pmi.output
 
 
 @dataclass
 class Reference:
-    """The ground-truth structure of one case.
+    """The ground truth of one case.
 
-    coordinates : (n_copies, n_beads_per_copy, 3) rigid-body bead positions.
-    imp_score : the full IMP score of the ground truth, under the same
-        restraints the samplers see -- the score a perfect sampler would find
-        (or beat, if the restraints are noisy), drawn as the target line on the
-        score-convergence plot.
+    rmf_path : one-frame RMF3 of the unshuffled build.
+    imp_score : its IMP score under the same restraints the samplers see --
+        the score a perfect sampler would find, drawn as the target line on
+        the score-convergence plot. Note this is *not* necessarily the lowest
+        score available: if the representation cannot reproduce the input
+        structure exactly (coarse beads clashing across a tight interface,
+        say), models that score better than the ground truth exist, and the
+        gap between this number and what samplers reach is the model's own
+        error rather than a sampling failure.
     """
 
-    coordinates: np.ndarray
+    rmf_path: str
     imp_score: float
 
 
-def copy_coordinates(root_hier, proteins, copy_number: int) -> np.ndarray:
-    """Rigid-body bead coordinates, shaped (copy, bead, xyz).
-
-    Ordering is molecule-major (the system module's fixed PROTEINS order) then
-    representation order within a molecule, which is what IMP.atom.Selection
-    returns. The reference and every trajectory are built by the same code, so
-    row i is the same bead in both.
-    """
-    per_copy = []
-    for copy_index in range(copy_number):
-        rows = []
-        for protein in proteins:
-            particles = IMP.atom.Selection(
-                root_hier, molecule=protein, copy_index=copy_index,
-                resolution=1).get_selected_particles()
-            rows.extend(IMP.core.XYZ(p).get_coordinates() for p in particles
-                        if IMP.core.RigidMember.get_is_setup(p))
-        per_copy.append(np.asarray([list(v) for v in rows], dtype=float))
-    return np.stack(per_copy)
-
-
-def kabsch_rmsd(mobile: np.ndarray, target: np.ndarray) -> float:
-    """RMSD of two (n, 3) point sets after optimal rigid superposition.
-
-    The determinant check forces a proper rotation: an unchecked SVD can return
-    a reflection, which would score a mirror image as a perfect match.
-    """
-    mobile = mobile - mobile.mean(axis=0)
-    target = target - target.mean(axis=0)
-    u, _, vt = np.linalg.svd(mobile.T @ target)
-    parity = np.sign(np.linalg.det(vt.T @ u.T))
-    rotation = vt.T @ np.diag([1.0, 1.0, parity]) @ u.T
-    difference = (rotation @ mobile.T).T - target
-    return float(np.sqrt((difference ** 2).sum(axis=1).mean()))
-
-
-def rmsd_to_reference(model: np.ndarray, reference: np.ndarray) -> float:
-    """One RMSD for the whole model, minimised over copy relabellings.
-
-    Both arguments are (n_copies, n_beads, 3) arrays from copy_coordinates.
-    """
-    n_copies = reference.shape[0]
-    target = reference.reshape(-1, 3)
-    orders = (itertools.permutations(range(n_copies))
-              if n_copies <= MAX_PERMUTED_COPIES else [tuple(range(n_copies))])
-    return min(kabsch_rmsd(model[list(order)].reshape(-1, 3), target)
-               for order in orders)
-
-
-def build_reference(system, copy_number: int, distance_csv=None) -> Reference:
-    """Build the case's ground truth: the same system, left unshuffled.
+def write_reference(system, copy_number: int, distance_csv, rmf_path: str) -> Reference:
+    """Build the case's ground truth and write it as a one-frame RMF3.
 
     `distance_csv` must be the restraint file the samplers use, so that the
     reference's IMP score is comparable to theirs.
     """
     built, score_function, _ = system.build_system(
         copy_number=copy_number, distance_csv=distance_csv, shuffle=False)
-    return Reference(
-        coordinates=copy_coordinates(built.root_hier, system.PROTEINS, copy_number),
-        imp_score=float(score_function.evaluate(False)),
-    )
+    score = float(score_function.evaluate(False))
+    output = IMP.pmi.output.Output()
+    output.init_rmf(rmf_path, [built.root_hier])
+    output.write_rmf(rmf_path)
+    output.close_rmf(rmf_path)
+    return Reference(rmf_path=rmf_path, imp_score=score)
+
+
+class RmsdToReference:
+    """Measures frames of an RMF3 against a Reference, via PMI's Precision.
+
+    One instance per case; `rmsd_for` is called once per trajectory file with
+    all of the frames that file needs measured, since Precision reads frames
+    in a batch and a fresh object per frame would re-read the reference every
+    time.
+    """
+
+    def __init__(self, reference: Reference, proteins: Sequence[str]) -> None:
+        self.reference = reference
+        # "selection" is the key PMI_analysis uses; the alignment and the
+        # measurement are both made over it, giving one global RMSD.
+        self.selection_dictionary = {"selection": list(proteins)}
+
+    def rmsd_for(self, rmf_path: str, frames: Sequence[int]) -> np.ndarray:
+        """RMSD of the given frames of one RMF3 file, in the order asked for."""
+        frames = list(frames)
+        if not frames:
+            return np.empty(0)
+        model = IMP.Model()
+        precision = IMP.pmi.analysis.Precision(
+            model, resolution=1, selection_dictionary=self.selection_dictionary)
+        precision.set_precision_style("pairwise_rmsd")
+        # Precision narrates every frame it reads; that is one line per frame.
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            precision.add_structures(zip([rmf_path] * len(frames), frames), "set0")
+            precision.set_reference_structure(self.reference.rmf_path, 0)
+            values = precision.get_rmsd_wrt_reference_structure_with_alignment(
+                "set0", "selection")
+        return np.asarray(values["selection"]["all_distances"], dtype=float)

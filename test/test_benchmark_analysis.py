@@ -1,5 +1,9 @@
 """Tests for the benchmark's accuracy measurement and its replica-exchange launcher.
 
+The RMSD itself is IMP's (IMP.pmi.analysis.Precision, via structure_rmsd.py),
+so what is tested here is that the right frames are measured and reported --
+not the RMSD formula.
+
 Covers examples/harness/trajectory_analysis.py (best-scoring models, their
 RMSD, the convergence trace, time to solution) and examples/harness/
 run_imp_rex.py (the MPI command it builds, its refusal to run many ranks
@@ -57,7 +61,8 @@ class AnalyseRunTests(unittest.TestCase):
         IMP.random_number_generator.seed(3)
         built, _, _ = kcoil_ecoil_system.build_kcoil_ecoil_system(
             copy_number=1, shuffle=False, distance_csv=False)
-        cls.reference = structure_rmsd.build_reference(kcoil_ecoil_system, 1, False)
+        cls.reference = structure_rmsd.write_reference(
+            kcoil_ecoil_system, 1, False, os.path.join(cls.tmpdir.name, "reference.rmf3"))
         truth = {rb: rb.get_reference_frame() for rb in built.dof.get_rigid_bodies()}
         flexible = {p: IMP.core.XYZ(p).get_coordinates() for p in built.dof.get_flexible_beads()}
 
@@ -107,7 +112,7 @@ class AnalyseRunTests(unittest.TestCase):
     def test_an_unreached_threshold_reports_nan(self):
         result = trajectory_analysis.analyse_run(
             kcoil_ecoil_system, [trajectory_analysis.TrajectoryFile(self.rmf_path, 0.0, 8.0)],
-            1, False, structure_rmsd.Reference(self.reference.coordinates + 0.0, 0.0),
+            1, False, self.reference,
             n_best=1, burnin_fraction=0.0, success_rmsd=-1.0)
         self.assertTrue(np.isnan(result["time_to_solution"]))
 
